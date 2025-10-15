@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 # NOTE: Using placeholder for security, please ensure your environment variables are set.
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8268736244:AAGwfDn1Hzlor58Sg5A7cczwzRldVJNY")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8454570063:AAFuA_290carhH-HNX8f2qRaBAic_hsus3E")
 MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://confident-jemima-school1660440-5a325843.koyeb.app")
 PORT = int(os.getenv("PORT", 8000))
