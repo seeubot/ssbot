@@ -10,6 +10,7 @@ import math
 import logging
 import subprocess
 import json
+import requests
 from urllib.parse import urlparse
 
 # Setup logging
@@ -31,7 +32,8 @@ LARGE_FILE_THRESHOLD = 20 * 1024 * 1024
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client.telegram_bot
 screenshots_collection = db.screenshots
-queue_collection = db.processing_queue # Unused but kept from original
+# NEW: Collection for temporary state storage during confirmation
+pending_files_collection = db.pending_files
 
 # Global session
 session = None
@@ -45,7 +47,7 @@ def create_progress_bar(percentage, length=10):
     return f"[{bar}] {percentage:.0f}%"
 
 async def send_message(chat_id, text, reply_markup=None):
-    """Send message via Telegram API"""
+    """Send message via Telegram API with detailed error logging"""
     url = f"{TELEGRAM_API}/sendMessage"
     data = {
         "chat_id": chat_id,
@@ -57,13 +59,17 @@ async def send_message(chat_id, text, reply_markup=None):
     
     try:
         async with session.post(url, json=data, timeout=ClientTimeout(total=30)) as resp:
-            return await resp.json()
+            result = await resp.json()
+            if resp.status != 200 or not result.get('ok', False):
+                logger.error(f"Telegram API Error (sendMessage): Status={resp.status}, Body={result}")
+                return None
+            return result
     except Exception as e:
-        logger.error(f"Send message error: {e}")
+        logger.error(f"Send message exception: {e}")
         return None
 
 async def edit_message(chat_id, message_id, text, reply_markup=None):
-    """Edit message via Telegram API"""
+    """Edit message via Telegram API with detailed error logging"""
     url = f"{TELEGRAM_API}/editMessageText"
     data = {
         "chat_id": chat_id,
@@ -76,22 +82,30 @@ async def edit_message(chat_id, message_id, text, reply_markup=None):
     
     try:
         async with session.post(url, json=data, timeout=ClientTimeout(total=10)) as resp:
-            return await resp.json()
+            result = await resp.json()
+            if resp.status != 200 and resp.status != 400: # 400 is common for "message not modified"
+                logger.error(f"Telegram API Error (editMessageText): Status={resp.status}, Body={result}")
+                return None
+            return result
     except:
         pass
 
 async def delete_message(chat_id, message_id):
-    """Delete message"""
+    """Delete message with detailed error logging"""
     url = f"{TELEGRAM_API}/deleteMessage"
     data = {"chat_id": chat_id, "message_id": message_id}
     try:
         async with session.post(url, json=data, timeout=ClientTimeout(total=10)) as resp:
-            return await resp.json()
+            result = await resp.json()
+            if resp.status != 200 and not result.get('ok', False):
+                logger.warning(f"Telegram API Error (deleteMessage): Status={resp.status}, Body={result}")
+                return None
+            return result
     except:
         pass
 
 async def send_photo(chat_id, photo_path, caption):
-    """Send photo via Telegram API"""
+    """Send photo via Telegram API with detailed error logging"""
     url = f"{TELEGRAM_API}/sendPhoto"
     data = FormData()
     data.add_field('chat_id', str(chat_id))
@@ -102,51 +116,60 @@ async def send_photo(chat_id, photo_path, caption):
         with open(photo_path, 'rb') as f:
             data.add_field('photo', f, filename='photo.jpg')
             async with session.post(url, data=data, timeout=ClientTimeout(total=60)) as resp:
-                return await resp.json()
+                result = await resp.json()
+                if resp.status != 200 or not result.get('ok', False):
+                    logger.error(f"Telegram API Error (sendPhoto): Status={resp.status}, Body={result}")
+                    return None
+                return result
     except Exception as e:
-        logger.error(f"Send photo error: {e}")
+        logger.error(f"Send photo exception: {e}")
         return None
 
 async def send_media_group(chat_id, media_files):
-    """Send media group"""
+    """Send media group with detailed error logging"""
     url = f"{TELEGRAM_API}/sendMediaGroup"
     
+    data = FormData()
+    data.add_field('chat_id', str(chat_id))
+    
+    media_array = []
+    files_to_close = []
+    
+    for idx, item in enumerate(media_files):
+        media_array.append({
+            "type": "photo",
+            "media": f"attach://photo{idx}",
+            "caption": item['caption']
+        })
+        f = open(item['path'], 'rb')
+        files_to_close.append(f)
+        data.add_field(f'photo{idx}', f, filename=f'photo{idx}.jpg')
+    
+    data.add_field('media', json.dumps(media_array))
+    
     try:
-        data = FormData()
-        data.add_field('chat_id', str(chat_id))
-        
-        media_array = []
-        files_to_close = []
-        
-        for idx, item in enumerate(media_files):
-            media_array.append({
-                "type": "photo",
-                "media": f"attach://photo{idx}",
-                "caption": item['caption']
-            })
-            # Open file handles for the form data
-            f = open(item['path'], 'rb')
-            files_to_close.append(f)
-            data.add_field(f'photo{idx}', f, filename=f'photo{idx}.jpg')
-        
-        data.add_field('media', json.dumps(media_array))
-        
         async with session.post(url, data=data, timeout=ClientTimeout(total=120)) as resp:
             result = await resp.json()
-        
-        # Close file handles
+            # Close file handles regardless of API success
+            for f in files_to_close:
+                f.close()
+            
+            if resp.status != 200 or not result.get('ok', False):
+                logger.error(f"Telegram API Error (sendMediaGroup): Status={resp.status}, Body={result}")
+                return None
+            return result
+    except Exception as e:
+        # Ensure file handles are closed even if a network exception occurs
         for f in files_to_close:
             f.close()
-        
-        return result
-    except Exception as e:
-        logger.error(f"Send media group error: {e}")
+        logger.error(f"Send media group exception: {e}")
         return None
 
-# --- Download/Upload/Processing Functions (kept mostly original) ---
+
+# --- Download/Upload/Processing Functions (The core logic is kept, only messaging updated) ---
 
 async def download_large_file(file_id, destination, chat_id, message_id):
-    """Download large files with progress updates"""
+    """Download large files with progress updates (Timeout adjusted for safety)"""
     # ... (Download logic remains the same)
     try:
         url = f"{TELEGRAM_API}/getFile"
@@ -172,10 +195,8 @@ async def download_large_file(file_id, destination, chat_id, message_id):
                             f.write(chunk)
                             downloaded += len(chunk)
                             
-                            # Update progress every 5%
                             if total_size > 0:
                                 progress = (downloaded / total_size) * 100
-                                # Throttle updates to avoid hitting Telegram API limits
                                 if int(progress) % 5 == 0 and progress > 0:
                                     await edit_message(chat_id, message_id, 
                                         f"⬇️ **Downloading**\n\n{create_progress_bar(progress)}\n"
@@ -190,9 +211,7 @@ async def download_large_file(file_id, destination, chat_id, message_id):
         return False
 
 async def download_file_streaming(file_id, destination, chat_id, message_id):
-    """Alternative streaming download method (kept for robustness)"""
-    # ... (Download logic remains the same)
-    # The logic is simplified for brevity but kept in principle.
+    """Alternative streaming download method (Timeout adjusted for safety)"""
     try:
         file_info_url = f"{TELEGRAM_API}/getFile"
         async with session.get(file_info_url, params={"file_id": file_id}) as resp:
@@ -213,8 +232,7 @@ async def download_file_streaming(file_id, destination, chat_id, message_id):
                 f.write(chunk)
                 downloaded += len(chunk)
                 
-                # Update progress
-                if total_size > 0 and downloaded % (10 * 1024 * 1024) == 0:  # Every 10MB
+                if total_size > 0 and downloaded % (10 * 1024 * 1024) == 0:
                     progress = (downloaded / total_size) * 100
                     await edit_message(chat_id, message_id, 
                         f"⬇️ **Downloading**\n\n{create_progress_bar(progress)}\n"
@@ -228,7 +246,7 @@ async def download_file_streaming(file_id, destination, chat_id, message_id):
         return False
 
 async def upload_to_catbox(file_path):
-    """Upload to Catbox.moe (kept original)"""
+    """Upload to Catbox.moe"""
     try:
         timeout = ClientTimeout(total=120)
         async with ClientSession(timeout=timeout) as sess:
@@ -247,12 +265,8 @@ async def upload_to_catbox(file_path):
     return None
 
 def extract_screenshots_efficient(video_path, num_screenshots=5):
-    """Efficient screenshot extraction with error handling (kept original)"""
-    # NOTE: The helper functions like compress_video_advanced, create_thumbnail, and 
-    # extract_screenshots_efficient were kept outside the main web handler for clarity 
-    # and because they contain blocking code (subprocess, cv2, PIL) best run in 
-    # asyncio.to_thread or process_large_video's current background execution.
-    
+    """Efficient screenshot extraction with error handling"""
+    # ... (Extraction logic remains the same)
     screenshots = []
     temp_dir = tempfile.mkdtemp()
     
@@ -268,7 +282,6 @@ def extract_screenshots_efficient(video_path, num_screenshots=5):
             info = json.loads(result.stdout)
             if 'format' in info and 'duration' in info['format']:
                 duration = float(info['format']['duration'])
-                # A simple estimation if frames/fps are missing
                 total_frames = int(duration * 25) # Assume 25 FPS
                 fps = 25
             else:
@@ -286,7 +299,6 @@ def extract_screenshots_efficient(video_path, num_screenshots=5):
         else:
             frame_positions = []
 
-        # Extract frames
         for idx, frame_pos in enumerate(frame_positions):
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_pos))
             ret, frame = cap.read()
@@ -300,7 +312,6 @@ def extract_screenshots_efficient(video_path, num_screenshots=5):
                     'path': screenshot_path,
                     'timestamp': timestamp
                 })
-            # FFmpeg fallback logic removed for brevity but can be re-added if needed
         
         cap.release()
         return screenshots, duration, temp_dir
@@ -314,7 +325,8 @@ def extract_screenshots_efficient(video_path, num_screenshots=5):
         return [], 0, temp_dir
 
 def create_thumbnail(screenshot_paths, output_path):
-    """Create thumbnail grid (kept original)"""
+    """Create thumbnail grid"""
+    # ... (Thumbnail logic remains the same)
     try:
         images = []
         for path in screenshot_paths[:5]:
@@ -328,7 +340,6 @@ def create_thumbnail(screenshot_paths, output_path):
         
         cols = 2
         rows = math.ceil(len(images) / 2)
-        # 10px padding between images
         width = images[0].width * cols + 10 * (cols - 1)
         height = images[0].height * rows + 10 * (rows - 1)
         
@@ -348,23 +359,23 @@ def create_thumbnail(screenshot_paths, output_path):
 # --- Main Processing Logic ---
 
 async def process_large_video(chat_id, file_id, file_name, file_size, message_id):
-    """Process large video files with advanced techniques"""
-    # This function remains largely the same, responsible for the heavy lifting
+    """Process large video files (modified to use new logging)"""
     temp_dir = None
     video_path = None
     
     try:
-        logger.info(f"Processing video: {file_name} ({file_size/(1024*1024):.1f}MB)")
+        logger.info(f"Processing video: {file_name} ({file_size/(1024*1024):.1f}MB) for chat {chat_id}")
         
         temp_dir = tempfile.mkdtemp()
         video_path = os.path.join(temp_dir, f"video_{file_id}.mp4")
         
+        # 1. Update status
         await edit_message(chat_id, message_id, 
             f"⬇️ **Downloading Large File**\n\n{create_progress_bar(0)}\n"
             f"📁 {file_name}\n💾 {file_size/(1024*1024):.1f}MB\n"
             f"⏰ This may take a while...")
         
-        # Download
+        # 2. Download
         download_success = await download_large_file(file_id, video_path, chat_id, message_id)
         if not download_success:
             await edit_message(chat_id, message_id, "🔄 Trying alternative download method...")
@@ -378,26 +389,23 @@ async def process_large_video(chat_id, file_id, file_name, file_size, message_id
         downloaded_size = os.path.getsize(video_path) / (1024 * 1024)
         logger.info(f"Successfully downloaded: {downloaded_size:.1f}MB")
         
-        # Extract screenshots
+        # 3. Extract screenshots
         await edit_message(chat_id, message_id, 
             f"🎬 **Extracting Screenshots**\n\n{create_progress_bar(60)}")
         
-        # Note: extract_screenshots_efficient is a blocking call, running it inside 
-        # the asyncio task is acceptable here as it's the main payload, but for production
-        # it's best to wrap it in asyncio.to_thread() if possible.
-        screenshots, duration, screenshot_temp_dir = extract_screenshots_efficient(video_path, 5)
+        screenshots, duration, screenshot_temp_dir = await asyncio.to_thread(extract_screenshots_efficient, video_path, 5)
         
         if not screenshots:
             await edit_message(chat_id, message_id, 
                 "❌ Failed to extract screenshots! File might be corrupted.")
             return
         
-        # Upload to Catbox
+        # 4. Upload to Catbox
         await edit_message(chat_id, message_id, 
             f"📤 **Uploading to Catbox**\n\n{create_progress_bar(80)}")
         
         thumbnail_path = os.path.join(temp_dir, "thumbnail.jpg")
-        thumbnail_created = create_thumbnail([s['path'] for s in screenshots], thumbnail_path)
+        thumbnail_created = await asyncio.to_thread(create_thumbnail, [s['path'] for s in screenshots], thumbnail_path)
         
         upload_tasks = [upload_to_catbox(ss['path']) for ss in screenshots]
         if thumbnail_created:
@@ -407,7 +415,7 @@ async def process_large_video(chat_id, file_id, file_name, file_size, message_id
         screenshot_urls = [url for url in results[:5] if isinstance(url, str) and url]
         thumbnail_url = results[-1] if thumbnail_created and len(results) > 5 and isinstance(results[-1], str) else None
         
-        # Save to database
+        # 5. Save to database
         try:
             await screenshots_collection.insert_one({
                 "chat_id": chat_id,
@@ -416,16 +424,17 @@ async def process_large_video(chat_id, file_id, file_name, file_size, message_id
                 "duration": duration,
                 "screenshot_urls": screenshot_urls,
                 "thumbnail_url": thumbnail_url,
-                "large_file": file_size > LARGE_FILE_THRESHOLD, # Record if it was a large file
+                "large_file": file_size > LARGE_FILE_THRESHOLD,
                 "timestamp": datetime.utcnow()
             })
         except Exception as e:
-            logger.error(f"MongoDB error: {e}")
+            logger.error(f"MongoDB save error: {e}")
         
-        # Send results
+        # 6. Send results
         await edit_message(chat_id, message_id, 
             f"✅ **Processing Complete!**\n\n{create_progress_bar(100)}")
         
+        # Send thumbnail
         if thumbnail_created and os.path.exists(thumbnail_path):
             caption = (
                 f"🎬 **{file_name}**\n"
@@ -438,6 +447,7 @@ async def process_large_video(chat_id, file_id, file_name, file_size, message_id
             
             await send_photo(chat_id, thumbnail_path, caption)
         
+        # Send screenshots
         if screenshots:
             media_files = []
             for idx, ss in enumerate(screenshots):
@@ -450,6 +460,7 @@ async def process_large_video(chat_id, file_id, file_name, file_size, message_id
             
             await send_media_group(chat_id, media_files)
         
+        # Send URL summary
         if screenshot_urls:
             urls_text = "🔗 **All Screenshot Links:**\n\n"
             for i, url in enumerate(screenshot_urls, 1):
@@ -464,9 +475,8 @@ async def process_large_video(chat_id, file_id, file_name, file_size, message_id
         logger.error(f"Video processing error: {e}")
         try:
             await edit_message(chat_id, message_id, 
-                f"❌ Processing Error\n\n"
-                f"Error: {str(e)[:200]}\n\n"
-                f"💡 Try sending a smaller file or different format.")
+                f"❌ Critical Processing Error\n\n"
+                f"Error: {str(e)[:200]}")
         except:
             pass
     
@@ -474,39 +484,49 @@ async def process_large_video(chat_id, file_id, file_name, file_size, message_id
         # Cleanup
         if temp_dir and os.path.exists(temp_dir):
             try:
-                # Recursively remove all files and the directory
                 import shutil
                 shutil.rmtree(temp_dir)
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Cleanup error for {temp_dir}: {e}")
 
-# --- Webhook Handlers ---
+# --- Webhook Handlers (Updated for state management) ---
 
 async def handle_callback_query(update):
-    """Handle inline button presses"""
+    """Handle inline button presses using file_id to look up metadata"""
     callback_query = update['callback_query']
     data = callback_query['data']
     chat_id = callback_query['message']['chat']['id']
     message_id = callback_query['message']['message_id']
     
-    if data.startswith('start_process_'):
-        # Data format: start_process_{file_id}_{file_name}_{file_size}
-        parts = data.split('_')
-        file_id = parts[2]
-        file_name = parts[3]
-        file_size = int(parts[4])
+    if data.startswith('start_'):
+        # Data is now just 'start_{file_id}'
+        file_id = data.split('_')[1]
         
-        # Remove the inline keyboard and start processing
+        # 1. Look up the file metadata from the pending collection
+        file_metadata = await pending_files_collection.find_one({"file_id": file_id})
+        
+        if not file_metadata:
+            await edit_message(chat_id, message_id, "❌ Error: File link expired or processing already started.")
+            return
+
+        # 2. Extract metadata
+        file_name = file_metadata['file_name']
+        file_size = file_metadata['file_size']
+        
+        # 3. Delete temporary state from MongoDB
+        await pending_files_collection.delete_one({"file_id": file_id})
+
+        # 4. Remove the inline keyboard and start processing
         await edit_message(chat_id, message_id, 
             f"✅ Confirmed! Starting download and processing for:\n"
             f"📁 **{file_name}**\n"
             f"💾 {file_size/(1024*1024):.1f}MB")
         
-        # Start the heavy lifting task
+        # 5. Start the heavy lifting task
         asyncio.create_task(process_large_video(chat_id, file_id, file_name, file_size, message_id))
 
 async def handle_webhook(request):
-    """Handle incoming webhook"""
+    """Handle incoming webhook (Updated for state management)"""
     try:
         data = await request.json()
         
@@ -514,34 +534,24 @@ async def handle_webhook(request):
             message = data['message']
             chat_id = message['chat']['id']
             
-            # Handle commands
             if 'text' in message:
                 text = message['text']
+                
+                # ... (Handle commands: /start, /help, /stats) ...
                 if text == '/start':
-                    await send_message(chat_id,
-                        "👋 **Welcome to Advanced Screenshot Bot!**\n\n"
-                        "📹 Send any video (up to 2GB) and I'll extract 5 screenshots and upload them to Catbox.moe.\n"
-                        "💡 Files over 20MB will require confirmation before processing.")
+                    await send_message(chat_id, "👋 **Welcome to Advanced Screenshot Bot!**\n\n📹 Send any video (up to 2GB) and I'll extract 5 screenshots and upload them to Catbox.moe.\n💡 Files over 20MB will require confirmation before processing.")
                 elif text == '/help':
-                    await send_message(chat_id,
-                        "🤖 **How to use:** Send me a video file. If it's over 20MB, I'll ask you to confirm before starting the download. All processing happens asynchronously in the background.")
+                    await send_message(chat_id, "🤖 **How to use:** Send me a video file. If it's over 20MB, I'll ask you to confirm before starting the download. All processing happens asynchronously in the background.")
                 elif text == '/stats':
                     total_count = await screenshots_collection.count_documents({})
                     user_count = await screenshots_collection.count_documents({"chat_id": chat_id})
                     large_files = await screenshots_collection.count_documents({"chat_id": chat_id, "large_file": True})
-                    
-                    await send_message(chat_id,
-                        f"📊 **Your Stats**\n\n"
-                        f"✅ Your Videos: {user_count}\n"
-                        f"📸 Your Screenshots: {user_count * 5}\n"
-                        f"📦 Large Files (over 20MB): {large_files}\n"
-                        f"🌐 Total Processed: {total_count}")
+                    await send_message(chat_id, f"📊 **Your Stats**\n\n✅ Your Videos: {user_count}\n📸 Your Screenshots: {user_count * 5}\n📦 Large Files (over 20MB): {large_files}\n🌐 Total Processed: {total_count}")
             
-            # Handle video or document
             elif 'video' in message or 'document' in message:
                 file_obj = message.get('video') or message.get('document')
                 
-                # Check if it's a valid video file type (simplified check)
+                # Check for valid video file type (simplified check)
                 if 'document' in message:
                     mime = file_obj.get('mime_type', '')
                     fname = file_obj.get('file_name', '')
@@ -558,7 +568,21 @@ async def handle_webhook(request):
                 
                 if file_size > LARGE_FILE_THRESHOLD:
                     # --- LARGE FILE: PROMPT FOR CONFIRMATION ---
-                    callback_data = f"start_process_{file_id}_{file_name.replace(' ', '_')}_{file_size}"
+                    
+                    # 1. Store metadata in MongoDB (State Management)
+                    await pending_files_collection.update_one(
+                        {"file_id": file_id},
+                        {"$set": {
+                            "chat_id": chat_id,
+                            "file_name": file_name,
+                            "file_size": file_size,
+                            "timestamp": datetime.utcnow()
+                        }},
+                        upsert=True
+                    )
+                    
+                    # 2. Create CONCISE callback data (only file_id)
+                    callback_data = f"start_{file_id}"
                     
                     reply_markup = {
                         "inline_keyboard": [[
@@ -573,7 +597,7 @@ async def handle_webhook(request):
                         f"⚠️ **Confirmation Required: Large File Detected!**\n\n"
                         f"📁 **{file_name}**\n"
                         f"{size_info}\n\n"
-                        f"Processing this file will consume server resources and may take several minutes depending on size and connection. Do you want to proceed?",
+                        f"Please confirm to proceed with the download and processing:",
                         reply_markup=reply_markup)
                     
                 else:
@@ -593,7 +617,7 @@ async def handle_webhook(request):
         return web.Response(text="OK")
         
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        logger.error(f"Webhook processing error: {e}")
         return web.Response(text="OK")
 
 async def health_check(request):
