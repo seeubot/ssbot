@@ -20,7 +20,7 @@ API_HASH = "d538c2e1a687d414f5c3dce7bf4a743c"
 MONGO_URI = "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie"
 CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-WEBHOOK_URL = "https://your-domain.com/webhook"  # Change this to your domain
+WEBHOOK_URL = "https://confident-jemima-school1660440-5a325843.koyeb.app"  # Change this to your domain
 PORT = 8080
 
 # Initialize MongoDB
