@@ -41,13 +41,30 @@ session = None
 # --- Utility Functions ---
 
 def escape_markdown(text):
-    """Escape markdown characters"""
+    """Escape all markdown characters properly"""
     if not isinstance(text, str):
         return ""
+    
+    # Escape all special characters for MarkdownV2
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     for char in escape_chars:
         text = text.replace(char, f'\\{char}')
+    
     return text
+
+def safe_filename(text):
+    """Extract just the filename without path for display"""
+    if not isinstance(text, str):
+        return "video.mp4"
+    
+    # Get just the filename
+    filename = os.path.basename(text)
+    
+    # Remove problematic characters but keep it readable
+    safe_chars = " .-_()[]"
+    cleaned = ''.join(c for c in filename if c.isalnum() or c in safe_chars)
+    
+    return cleaned if cleaned else "video.mp4"
 
 def create_progress_bar(percentage, length=10):
     """Create visual progress bar"""
@@ -58,11 +75,18 @@ def create_progress_bar(percentage, length=10):
 async def send_message(chat_id, text, reply_markup=None, parse_mode="MarkdownV2"):
     """Send message via Telegram API"""
     url = f"{TELEGRAM_API}/sendMessage"
+    
+    # Always escape text for markdown
+    if parse_mode == "MarkdownV2":
+        text = escape_markdown(text)
+    
     data = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": parse_mode
     }
+    
+    if parse_mode:
+        data["parse_mode"] = parse_mode
     
     if reply_markup:
         data["reply_markup"] = reply_markup
@@ -72,8 +96,8 @@ async def send_message(chat_id, text, reply_markup=None, parse_mode="MarkdownV2"
             result = await resp.json()
             if not result.get('ok'):
                 logger.error(f"Send message error: {result}")
-                # Try without markdown
-                if "can't parse entities" in str(result):
+                # Retry without markdown if it fails
+                if parse_mode:
                     data.pop("parse_mode")
                     async with session.post(url, json=data, timeout=ClientTimeout(total=30)) as resp2:
                         return await resp2.json()
@@ -85,13 +109,20 @@ async def send_message(chat_id, text, reply_markup=None, parse_mode="MarkdownV2"
 async def edit_message(chat_id, message_id, text, reply_markup=None, parse_mode="MarkdownV2"):
     """Edit message via Telegram API"""
     url = f"{TELEGRAM_API}/editMessageText"
+    
+    # Always escape text for markdown
+    if parse_mode == "MarkdownV2":
+        text = escape_markdown(text)
+    
     data = {
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
-        "parse_mode": parse_mode
     }
     
+    if parse_mode:
+        data["parse_mode"] = parse_mode
+        
     if reply_markup:
         data["reply_markup"] = reply_markup
     
@@ -121,8 +152,10 @@ async def send_photo(chat_id, photo_path, caption, parse_mode="MarkdownV2"):
     url = f"{TELEGRAM_API}/sendPhoto"
     data = FormData()
     data.add_field('chat_id', str(chat_id))
-    data.add_field('caption', caption)
-    data.add_field('parse_mode', parse_mode)
+    data.add_field('caption', escape_markdown(caption) if parse_mode == "MarkdownV2" else caption)
+    
+    if parse_mode:
+        data.add_field('parse_mode', parse_mode)
     
     try:
         with open(photo_path, 'rb') as f:
@@ -144,12 +177,15 @@ async def send_media_group(chat_id, media_files, parse_mode="MarkdownV2"):
     files_to_close = []
     
     for idx, item in enumerate(media_files):
+        caption = escape_markdown(item['caption']) if parse_mode == "MarkdownV2" else item['caption']
         media_item = {
             "type": "photo",
             "media": f"attach://photo{idx}",
-            "caption": item['caption'],
-            "parse_mode": parse_mode
+            "caption": caption,
         }
+        if parse_mode:
+            media_item["parse_mode"] = parse_mode
+            
         media_array.append(media_item)
         f = open(item['path'], 'rb')
         files_to_close.append(f)
@@ -189,7 +225,7 @@ async def download_large_file(file_id, destination, chat_id, message_id):
             if resp.status == 200:
                 total_size = int(resp.headers.get('content-length', 0))
                 downloaded = 0
-                file_name = escape_markdown(os.path.basename(destination))
+                file_name = safe_filename(destination)
                 
                 with open(destination, 'wb') as f:
                     async for chunk in resp.content.iter_chunked(8192):
@@ -201,7 +237,7 @@ async def download_large_file(file_id, destination, chat_id, message_id):
                                 progress = (downloaded / total_size) * 100
                                 if int(progress) % 10 == 0:  # Update every 10%
                                     await edit_message(chat_id, message_id, 
-                                        f"⬇️ *Downloading*\n\n{create_progress_bar(progress)}\n"
+                                        f"⬇️ Downloading\n\n{create_progress_bar(progress)}\n"
                                         f"📁 {file_name}\n"
                                         f"💾 {downloaded/(1024*1024):.1f}MB / {total_size/(1024*1024):.1f}MB")
                 
@@ -233,7 +269,6 @@ async def optimize_video(input_path, output_path, strategy):
     """Optimize video using FFmpeg"""
     logger.info(f"Starting optimization with strategy: {strategy}")
     
-    # Check if input file exists
     if not os.path.exists(input_path):
         logger.error(f"Input file not found: {input_path}")
         return False
@@ -295,7 +330,7 @@ async def optimize_video(input_path, output_path, strategy):
         return False
 
 def extract_screenshots_efficient(video_path, num_screenshots=5):
-    """Extract screenshots from video"""
+    """Extract screenshots from video at equal intervals"""
     screenshots = []
     temp_dir = tempfile.mkdtemp()
     
@@ -309,7 +344,7 @@ def extract_screenshots_efficient(video_path, num_screenshots=5):
         fps = cap.get(cv2.CAP_PROP_FPS)
         
         if fps <= 0 or total_frames <= 0:
-            # Estimate duration
+            # Estimate duration using OpenCV
             cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1)
             duration = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
             cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 0)
@@ -318,26 +353,41 @@ def extract_screenshots_efficient(video_path, num_screenshots=5):
         else:
             duration = total_frames / fps
         
+        logger.info(f"Video info - Frames: {total_frames}, FPS: {fps:.2f}, Duration: {duration:.2f}s")
+        
         if total_frames > 0:
-            step = max(1, total_frames // (num_screenshots + 1))
-            frame_positions = [step * (i + 1) for i in range(num_screenshots)]
+            # Take screenshots at equal intervals throughout the video
+            frame_positions = []
+            for i in range(num_screenshots):
+                position = int((i + 1) * total_frames / (num_screenshots + 1))
+                frame_positions.append(min(position, total_frames - 1))
         else:
             frame_positions = []
 
+        logger.info(f"Extracting screenshots at positions: {frame_positions}")
+        
         for idx, frame_pos in enumerate(frame_positions):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, min(frame_pos, total_frames - 1))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
             ret, frame = cap.read()
             
-            if ret:
+            if ret and frame is not None:
                 screenshot_path = os.path.join(temp_dir, f"screenshot_{idx+1}.jpg")
-                cv2.imwrite(screenshot_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                timestamp = frame_pos / fps
-                screenshots.append({
-                    'path': screenshot_path,
-                    'timestamp': timestamp
-                })
+                success = cv2.imwrite(screenshot_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                
+                if success and os.path.exists(screenshot_path):
+                    timestamp = frame_pos / fps if fps > 0 else (idx * duration / num_screenshots)
+                    screenshots.append({
+                        'path': screenshot_path,
+                        'timestamp': timestamp
+                    })
+                    logger.info(f"Extracted screenshot {idx+1} at {timestamp:.2f}s")
+                else:
+                    logger.warning(f"Failed to write screenshot {idx+1}")
+            else:
+                logger.warning(f"Could not read frame at position {frame_pos}")
         
         cap.release()
+        logger.info(f"Successfully extracted {len(screenshots)} screenshots")
         return screenshots, duration, temp_dir
         
     except Exception as e:
@@ -348,11 +398,81 @@ def extract_screenshots_efficient(video_path, num_screenshots=5):
             pass
         return [], 0, temp_dir
 
+def create_comprehensive_thumbnail(video_path, output_path, num_frames=9):
+    """Create a comprehensive thumbnail with multiple frames from the entire video"""
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            logger.error(f"Cannot open video for thumbnail: {video_path}")
+            return None
+        
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        
+        if total_frames <= 0:
+            cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1)
+            duration_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+            cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 0)
+            total_frames = int((duration_ms / 1000) * (fps if fps > 0 else 25))
+        
+        frames = []
+        frame_positions = []
+        
+        # Get frames from throughout the entire video
+        for i in range(num_frames):
+            position = int((i + 0.5) * total_frames / num_frames)  # Spread evenly
+            frame_positions.append(min(position, total_frames - 1))
+        
+        for pos in frame_positions:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                # Resize frame to thumbnail size
+                frame = cv2.resize(frame, (200, 150))
+                frames.append(frame)
+        
+        cap.release()
+        
+        if not frames:
+            logger.error("No frames extracted for thumbnail")
+            return None
+        
+        # Create grid layout
+        cols = 3
+        rows = math.ceil(len(frames) / cols)
+        width = 200 * cols
+        height = 150 * rows
+        
+        thumbnail = Image.new('RGB', (width, height), (0, 0, 0))
+        
+        for idx, frame in enumerate(frames):
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            
+            x = (idx % cols) * 200
+            y = (idx // cols) * 150
+            thumbnail.paste(img, (x, y))
+        
+        # Add border and title
+        final_width = width + 20
+        final_height = height + 40
+        final_thumbnail = Image.new('RGB', (final_width, final_height), (30, 30, 30))
+        final_thumbnail.paste(thumbnail, (10, 30))
+        
+        thumbnail.save(output_path, 'JPEG', quality=90)
+        logger.info(f"Created comprehensive thumbnail with {len(frames)} frames")
+        return output_path
+        
+    except Exception as e:
+        logger.error(f"Comprehensive thumbnail error: {e}")
+        return None
+
 def create_thumbnail(screenshot_paths, output_path):
-    """Create thumbnail grid"""
+    """Create thumbnail grid from screenshots"""
     try:
         images = []
-        for path in screenshot_paths[:4]:  # Use max 4 images for thumbnail
+        for path in screenshot_paths[:9]:  # Use up to 9 images
             if os.path.exists(path):
                 img = Image.open(path)
                 img.thumbnail((200, 150), Image.Resampling.LANCZOS)
@@ -361,16 +481,16 @@ def create_thumbnail(screenshot_paths, output_path):
         if not images:
             return None
         
-        cols = 2
+        cols = 3
         rows = math.ceil(len(images) / cols)
-        width = images[0].width * cols
-        height = images[0].height * rows
+        width = 200 * cols
+        height = 150 * rows
         
         thumbnail = Image.new('RGB', (width, height), (0, 0, 0))
         
         for idx, img in enumerate(images):
-            x = (idx % cols) * images[0].width
-            y = (idx // cols) * images[0].height
+            x = (idx % cols) * 200
+            y = (idx // cols) * 150
             thumbnail.paste(img, (x, y))
         
         thumbnail.save(output_path, 'JPEG', quality=85)
@@ -384,13 +504,13 @@ async def process_video_final_steps(chat_id, video_path, original_file_name, ori
     temp_dir = os.path.dirname(video_path)
     
     try:
-        escaped_file_name = escape_markdown(original_file_name)
+        safe_file_name = safe_filename(original_file_name)
         current_size = os.path.getsize(video_path)
         
         # Extract screenshots
         await edit_message(chat_id, message_id, 
-            f"🎬 *Extracting Screenshots*\n\n{create_progress_bar(60)}\n"
-            f"📁 {escaped_file_name}")
+            f"🎬 Extracting Screenshots\n\n{create_progress_bar(60)}\n"
+            f"📁 {safe_file_name}")
         
         screenshots, duration, screenshot_temp_dir = await asyncio.to_thread(
             extract_screenshots_efficient, video_path, 5
@@ -398,29 +518,43 @@ async def process_video_final_steps(chat_id, video_path, original_file_name, ori
         
         if not screenshots:
             await edit_message(chat_id, message_id, 
-                f"❌ Failed to extract screenshots from {escaped_file_name}")
+                f"❌ Failed to extract screenshots from {safe_file_name}")
             return
+        
+        # Create comprehensive thumbnail from video
+        await edit_message(chat_id, message_id, 
+            f"🖼️ Creating Thumbnail\n\n{create_progress_bar(70)}\n"
+            f"📁 {safe_file_name}")
+        
+        comprehensive_thumbnail_path = os.path.join(temp_dir, "comprehensive_thumbnail.jpg")
+        comprehensive_thumbnail = await asyncio.to_thread(
+            create_comprehensive_thumbnail, video_path, comprehensive_thumbnail_path, 9
+        )
+        
+        # Also create regular thumbnail from screenshots
+        regular_thumbnail_path = os.path.join(temp_dir, "thumbnail.jpg")
+        regular_thumbnail = await asyncio.to_thread(
+            create_thumbnail, [s['path'] for s in screenshots], regular_thumbnail_path
+        )
+        
+        # Use comprehensive thumbnail if available, otherwise use regular
+        final_thumbnail_path = comprehensive_thumbnail_path if comprehensive_thumbnail else regular_thumbnail_path
         
         # Upload to Catbox
         await edit_message(chat_id, message_id, 
-            f"📤 *Uploading to Catbox*\n\n{create_progress_bar(80)}\n"
-            f"📁 {escaped_file_name}")
+            f"📤 Uploading to Catbox\n\n{create_progress_bar(80)}\n"
+            f"📁 {safe_file_name}")
         
-        thumbnail_path = os.path.join(temp_dir, "thumbnail.jpg")
-        thumbnail_created = await asyncio.to_thread(
-            create_thumbnail, [s['path'] for s in screenshots], thumbnail_path
-        )
-        
-        # Upload screenshots and thumbnail
         upload_tasks = []
         for ss in screenshots:
             upload_tasks.append(upload_to_catbox(ss['path']))
-        if thumbnail_created:
-            upload_tasks.append(upload_to_catbox(thumbnail_path))
+        
+        thumbnail_url = None
+        if final_thumbnail_path and os.path.exists(final_thumbnail_path):
+            thumbnail_url = await upload_to_catbox(final_thumbnail_path)
         
         results = await asyncio.gather(*upload_tasks, return_exceptions=True)
-        screenshot_urls = [url for url in results[:len(screenshots)] if isinstance(url, str) and url]
-        thumbnail_url = results[-1] if thumbnail_created and isinstance(results[-1], str) else None
+        screenshot_urls = [url for url in results if isinstance(url, str) and url]
         
         # Save to database
         try:
@@ -440,20 +574,26 @@ async def process_video_final_steps(chat_id, video_path, original_file_name, ori
         
         # Send completion message
         await edit_message(chat_id, message_id, 
-            f"✅ *Processing Complete*\n\n{create_progress_bar(100)}")
+            f"✅ Processing Complete\n\n{create_progress_bar(100)}")
         
-        # Send thumbnail
-        if thumbnail_created:
+        # Send comprehensive thumbnail
+        if final_thumbnail_path and os.path.exists(final_thumbnail_path):
+            size_reduction = ""
+            if current_size < original_file_size:
+                reduction = ((original_file_size - current_size) / original_file_size) * 100
+                size_reduction = f"📉 Reduced by {reduction:.1f}%\n"
+            
             caption = (
-                f"🎬 *{escaped_file_name}*\n"
+                f"🎬 {safe_file_name}\n"
                 f"⏱ {int(duration//60)}:{int(duration%60):02d}\n"
                 f"📦 Original: {original_file_size/(1024*1024):.1f}MB | Final: {current_size/(1024*1024):.1f}MB\n"
-                f"🔗 Processed successfully"
+                f"{size_reduction}"
+                f"🔗 {len(screenshot_urls)} screenshots uploaded"
             )
             if thumbnail_url:
-                caption += f"\n📷 Thumbnail: {escape_markdown(thumbnail_url)}"
+                caption += f"\n📷 Thumbnail: {thumbnail_url}"
             
-            await send_photo(chat_id, thumbnail_path, caption)
+            await send_photo(chat_id, final_thumbnail_path, caption)
         
         # Send screenshots
         if screenshots:
@@ -461,20 +601,20 @@ async def process_video_final_steps(chat_id, video_path, original_file_name, ori
             for idx, ss in enumerate(screenshots):
                 m = int(ss['timestamp'] // 60)
                 s = int(ss['timestamp'] % 60)
-                cap = f"📸 {idx+1}/5 - {m:02d}:{s:02d}"
+                cap = f"📸 {idx+1}/{len(screenshots)} - {m:02d}:{s:02d}"
                 if idx < len(screenshot_urls):
-                    cap += f"\n🔗 {escape_markdown(screenshot_urls[idx])}"
+                    cap += f"\n🔗 {screenshot_urls[idx]}"
                 media_files.append({'path': ss['path'], 'caption': cap})
             
             await send_media_group(chat_id, media_files)
         
         # Send URL summary
         if screenshot_urls:
-            urls_text = "*All Screenshot Links*\n\n"
+            urls_text = "All Screenshot Links\n\n"
             for i, url in enumerate(screenshot_urls, 1):
-                urls_text += f"{i}. {escape_markdown(url)}\n"
+                urls_text += f"{i}. {url}\n"
             
-            await send_message(chat_id, urls_text)
+            await send_message(chat_id, urls_text, parse_mode=None)
         
         await delete_message(chat_id, message_id)
         logger.info(f"Processing complete: {original_file_name}")
@@ -482,7 +622,7 @@ async def process_video_final_steps(chat_id, video_path, original_file_name, ori
     except Exception as e:
         logger.error(f"Final processing error: {e}")
         await edit_message(chat_id, message_id, 
-            f"❌ Processing Error\n\nError: {escape_markdown(str(e)[:200])}")
+            f"❌ Processing Error\n\nError: {str(e)[:200]}")
     
     finally:
         # Cleanup
@@ -499,12 +639,12 @@ async def process_video_download_and_optimize(chat_id, file_id, file_name, file_
     optimized_path = os.path.join(temp_dir, f"optimized_{file_id}.mp4")
     
     try:
-        escaped_file_name = escape_markdown(file_name)
+        safe_file_name = safe_filename(file_name)
         
         # Download file
         await edit_message(chat_id, message_id, 
-            f"⬇️ *Downloading File*\n\n{create_progress_bar(0)}\n"
-            f"📁 {escaped_file_name}\n"
+            f"⬇️ Downloading File\n\n{create_progress_bar(0)}\n"
+            f"📁 {safe_file_name}\n"
             f"💾 {file_size/(1024*1024):.1f}MB")
         
         if not await download_large_file(file_id, original_path, chat_id, message_id):
@@ -519,14 +659,15 @@ async def process_video_download_and_optimize(chat_id, file_id, file_name, file_
         
         if optimization_strategy and downloaded_size > 5 * 1024 * 1024:  # Only optimize >5MB files
             await edit_message(chat_id, message_id, 
-                f"⚙️ *Optimizing Video*\n\n{create_progress_bar(40)}\n"
+                f"⚙️ Optimizing Video\n\n{create_progress_bar(40)}\n"
                 f"Strategy: {optimization_strategy}\n"
-                f"📁 {escaped_file_name}")
+                f"📁 {safe_file_name}")
             
             if await optimize_video(original_path, optimized_path, optimization_strategy):
                 final_path = optimized_path
                 optimized_size = os.path.getsize(optimized_path)
-                logger.info(f"Optimized: {optimized_size/(1024*1024):.1f}MB (from {downloaded_size/(1024*1024):.1f}MB)")
+                reduction = ((downloaded_size - optimized_size) / downloaded_size) * 100
+                logger.info(f"Optimized: {optimized_size/(1024*1024):.1f}MB (reduced by {reduction:.1f}%)")
             else:
                 logger.warning("Optimization failed, using original file")
         
@@ -536,7 +677,7 @@ async def process_video_download_and_optimize(chat_id, file_id, file_name, file_
     except Exception as e:
         logger.error(f"Processing error: {e}")
         await edit_message(chat_id, message_id, 
-            f"❌ Processing Error\n\nError: {escape_markdown(str(e)[:200])}")
+            f"❌ Processing Error\n\nError: {str(e)[:200]}")
     
     finally:
         # Cleanup
@@ -568,6 +709,7 @@ async def handle_callback_query(update):
 
         file_name = file_metadata['file_name']
         file_size = file_metadata['file_size']
+        safe_name = safe_filename(file_name)
         
         # Show optimization options
         fast_data = f'optimize_fast_{file_id}'
@@ -581,8 +723,8 @@ async def handle_callback_query(update):
         }
         
         await edit_message(chat_id, message_id,
-            f"⚙️ *Choose Optimization*\n\n"
-            f"File: {escape_markdown(file_name)}\n"
+            f"⚙️ Choose Optimization\n\n"
+            f"File: {safe_name}\n"
             f"Size: {file_size/(1024*1024):.1f}MB\n\n"
             f"Select optimization method:",
             reply_markup=reply_markup)
@@ -601,10 +743,11 @@ async def handle_callback_query(update):
 
             file_name = file_metadata['file_name']
             file_size = file_metadata['file_size']
+            safe_name = safe_filename(file_name)
             
             await edit_message(chat_id, message_id, 
                 f"✅ Starting with {strategy} optimization\n"
-                f"📁 {escape_markdown(file_name)}")
+                f"📁 {safe_name}")
             
             # Start processing
             asyncio.create_task(
@@ -629,12 +772,12 @@ async def handle_webhook(request):
                 
                 if text == '/start':
                     await send_message(chat_id, 
-                        "*Welcome to Screenshot Bot!*\n\n"
+                        "Welcome to Screenshot Bot!\n\n"
                         "Send me any video file and I'll extract screenshots for you.\n"
                         "Files over 20MB will require confirmation.")
                 elif text == '/help':
                     await send_message(chat_id, 
-                        "*How to use:*\n"
+                        "How to use:\n"
                         "1. Send a video file\n"
                         "2. For large files (>20MB), confirm processing\n"
                         "3. Wait for screenshots\n\n"
@@ -643,7 +786,7 @@ async def handle_webhook(request):
                     total = await screenshots_collection.count_documents({})
                     user_total = await screenshots_collection.count_documents({"chat_id": chat_id})
                     await send_message(chat_id, 
-                        f"*Your Stats:*\n"
+                        f"Your Stats:\n"
                         f"Videos processed: {user_total}\n"
                         f"Total screenshots: {user_total * 5}\n"
                         f"Global total: {total}")
@@ -664,7 +807,7 @@ async def handle_webhook(request):
                         await send_message(chat_id, "❌ Please send a video file")
                         return web.Response(text="OK")
                 
-                escaped_name = escape_markdown(file_name)
+                safe_name = safe_filename(file_name)
                 
                 if file_size > LARGE_FILE_THRESHOLD:
                     # Store file info for callback
@@ -691,8 +834,8 @@ async def handle_webhook(request):
                     }
                     
                     await send_message(chat_id,
-                        f"⚠️ *Large File Detected*\n\n"
-                        f"File: {escaped_name}\n"
+                        f"⚠️ Large File Detected\n\n"
+                        f"File: {safe_name}\n"
                         f"Size: {file_size/(1024*1024):.1f}MB\n\n"
                         f"Please confirm to start processing:",
                         reply_markup=reply_markup)
@@ -700,8 +843,8 @@ async def handle_webhook(request):
                 else:
                     # Small file - process immediately
                     result = await send_message(chat_id,
-                        f"⚡ *Processing Started*\n\n{create_progress_bar(0)}\n"
-                        f"📁 {escaped_name}\n"
+                        f"⚡ Processing Started\n\n{create_progress_bar(0)}\n"
+                        f"📁 {safe_name}\n"
                         f"Size: {file_size/(1024*1024):.1f}MB")
                     
                     if result and 'result' in result:
