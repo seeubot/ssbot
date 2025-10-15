@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Environment variables (set in Koyeb)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8268736244:AAGwfDn1Hzlor58Sg5A7cczwxYwzRldVJNY")
 MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Will be set automatically by Koyeb
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://confident-jemima-school1660440-5a325843.koyeb.app")  # Will be set automatically by Koyeb
 PORT = int(os.getenv("PORT", 8000))
 CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
