@@ -8,6 +8,8 @@ import tempfile
 from PIL import Image
 import math
 import logging
+import subprocess
+import json
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -16,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Environment variables (set in Koyeb)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8268736244:AAGwfDn1Hzlor58Sg5A7cczwxYwzRldVJNY")
 MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://confident-jemima-school1660440-5a325843.koyeb.app")  # Will be set automatically by Koyeb
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Will be set automatically by Koyeb
 PORT = int(os.getenv("PORT", 8000))
 CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -184,6 +186,59 @@ async def upload_to_catbox(file_path):
         logger.error(f"Catbox upload error: {e}")
     return None
 
+def compress_video(input_path, output_path, target_size_mb=15):
+    """
+    Compress video to target size using FFmpeg
+    target_size_mb: Target size in MB (default 15MB to stay under 20MB limit)
+    """
+    try:
+        # Get video duration
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_format', '-show_streams', input_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        info = json.loads(result.stdout)
+        
+        duration = float(info['format']['duration'])
+        
+        # Calculate target bitrate (in kbps)
+        target_size_bits = target_size_mb * 8 * 1024  # Convert MB to kilobits
+        target_bitrate = int(target_size_bits / duration / 1024)  # kbps
+        
+        # Ensure minimum bitrate for quality
+        target_bitrate = max(target_bitrate, 500)  # Minimum 500 kbps
+        
+        # Compress video using FFmpeg
+        cmd = [
+            'ffmpeg', '-i', input_path,
+            '-c:v', 'libx264',
+            '-b:v', f'{target_bitrate}k',
+            '-maxrate', f'{target_bitrate}k',
+            '-bufsize', f'{target_bitrate * 2}k',
+            '-preset', 'medium',
+            '-crf', '23',
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-y',  # Overwrite output file
+            output_path
+        ]
+        
+        logger.info(f"Compressing video with bitrate: {target_bitrate}kbps")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        
+        if result.returncode == 0 and os.path.exists(output_path):
+            compressed_size = os.path.getsize(output_path) / (1024 * 1024)
+            logger.info(f"Compression successful: {compressed_size:.1f}MB")
+            return True
+        else:
+            logger.error(f"FFmpeg error: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Video compression error: {e}")
+        return False
+
 def create_thumbnail(screenshot_paths, output_path):
     """Create thumbnail grid"""
     try:
@@ -258,17 +313,18 @@ def extract_screenshots(video_path, num_screenshots=5):
         return [], 0, temp_dir
 
 async def process_video(chat_id, file_id, file_name, file_size, message_id):
-    """Process video file"""
+    """Process video file - now handles files >20MB with compression"""
     temp_dir = None
     video_path = None
+    compressed_path = None
     
     try:
-        logger.info(f"Processing started for {file_name}")
+        logger.info(f"Processing started for {file_name} ({file_size/(1024*1024):.1f}MB)")
         
         # Update status
         await edit_message(chat_id, message_id, 
-            f"⬇️ **Downloading**\n\n{create_progress_bar(0)}\n📁 {file_name}")
-        
+            f"⬇️ **Downloading**\n\n{create_progress_bar(0)}\n📁 {file_name}\n💾 {file_size/(1024*1024):.1f}MB")
+
         # Download
         temp_dir = tempfile.mkdtemp()
         video_path = os.path.join(temp_dir, f"video_{file_id}.mp4")
@@ -276,21 +332,46 @@ async def process_video(chat_id, file_id, file_name, file_size, message_id):
         download_success = await download_file(file_id, video_path)
         
         if not download_success or not os.path.exists(video_path):
-            await edit_message(chat_id, message_id, "❌ Download failed! File might be too large (>20MB).")
+            await edit_message(chat_id, message_id, "❌ Download failed!")
             return
         
-        await edit_message(chat_id, message_id, 
-            f"🎬 **Extracting Screenshots**\n\n{create_progress_bar(30)}")
+        downloaded_size = os.path.getsize(video_path) / (1024 * 1024)
+        logger.info(f"Downloaded: {downloaded_size:.1f}MB")
         
+        # Check if compression is needed
+        needs_compression = downloaded_size > 20
+        processing_video_path = video_path
+        
+        if needs_compression:
+            await edit_message(chat_id, message_id, 
+                f"🎬 **Compressing Video**\n\n{create_progress_bar(20)}\n📦 Reducing size for processing...")
+            
+            compressed_path = os.path.join(temp_dir, f"compressed_{file_id}.mp4")
+            compression_success = compress_video(video_path, compressed_path)
+            
+            if compression_success:
+                compressed_size = os.path.getsize(compressed_path) / (1024 * 1024)
+                logger.info(f"Compressed from {downloaded_size:.1f}MB to {compressed_size:.1f}MB")
+                processing_video_path = compressed_path
+                await edit_message(chat_id, message_id, 
+                    f"✅ **Compression Complete**\n\n{create_progress_bar(40)}\n📦 {compressed_size:.1f}MB (reduced from {downloaded_size:.1f}MB)")
+            else:
+                await edit_message(chat_id, message_id, 
+                    f"⚠️ **Using Original**\n\n{create_progress_bar(40)}\n📦 Compression failed, using original file")
+                # Continue with original file even if compression fails
+        else:
+            await edit_message(chat_id, message_id, 
+                f"🎬 **Extracting Screenshots**\n\n{create_progress_bar(40)}")
+
         # Extract screenshots
-        screenshots, duration, _ = extract_screenshots(video_path, 5)
+        screenshots, duration, screenshot_temp_dir = extract_screenshots(processing_video_path, 5)
         
         if not screenshots:
             await edit_message(chat_id, message_id, "❌ Failed to extract screenshots!")
             return
         
         await edit_message(chat_id, message_id, 
-            f"📤 **Uploading to Catbox**\n\n{create_progress_bar(60)}")
+            f"📤 **Uploading to Catbox**\n\n{create_progress_bar(70)}")
         
         # Create thumbnail
         thumbnail_path = os.path.join(temp_dir, "thumbnail.jpg")
@@ -311,6 +392,7 @@ async def process_video(chat_id, file_id, file_name, file_size, message_id):
                 "chat_id": chat_id,
                 "file_name": file_name,
                 "file_size": file_size,
+                "compressed": needs_compression,
                 "duration": duration,
                 "screenshot_urls": screenshot_urls,
                 "thumbnail_url": thumbnail_url,
@@ -324,8 +406,9 @@ async def process_video(chat_id, file_id, file_name, file_size, message_id):
         
         # Send thumbnail
         if thumbnail_created and os.path.exists(thumbnail_path):
+            compression_note = " (compressed)" if needs_compression else ""
             caption = (
-                f"🎬 **{file_name}**\n"
+                f"🎬 **{file_name}**{compression_note}\n"
                 f"⏱ {int(duration//60)}:{int(duration%60):02d}\n"
                 f"📦 {file_size/(1024*1024):.1f} MB\n"
             )
@@ -397,24 +480,32 @@ async def handle_webhook(request):
                     "👋 **Welcome to Screenshot Bot!**\n\n"
                     "📹 Send video → Get 5 screenshots\n"
                     "🔗 Catbox.moe hosting\n"
-                    "⚡ Fast processing\n\n"
+                    "⚡ Automatic compression for large files\n"
+                    "📦 Supports files >20MB\n\n"
                     "Commands: /start /help /stats")
                 
             elif text == '/help':
                 await send_message(chat_id,
                     "🤖 **How to use:**\n\n"
-                    "1. Send video file\n"
-                    "2. Wait for processing\n"
-                    "3. Get screenshots + URLs\n\n"
-                    "📦 Max: 20MB (Telegram limit)\n"
-                    "🎬 Formats: MP4, MKV, AVI, MOV, etc.")
+                    "1. Send video file (any size)\n"
+                    "2. Large files are automatically compressed\n"
+                    "3. Wait for processing\n"
+                    "4. Get screenshots + URLs\n\n"
+                    "📦 Large files: Auto-compressed\n"
+                    "🎬 Formats: MP4, MKV, AVI, MOV, etc.\n"
+                    "⚡ Fast processing with compression")
                 
             elif text == '/stats':
                 count = await screenshots_collection.count_documents({"chat_id": chat_id})
+                compressed_count = await screenshots_collection.count_documents({
+                    "chat_id": chat_id, 
+                    "compressed": True
+                })
                 await send_message(chat_id,
                     f"📊 **Your Stats**\n\n"
                     f"✅ Videos: {count}\n"
-                    f"📸 Screenshots: {count * 5}")
+                    f"📸 Screenshots: {count * 5}\n"
+                    f"🎬 Compressed: {compressed_count}")
         
         # Handle video
         elif 'video' in message or 'document' in message:
@@ -433,14 +524,12 @@ async def handle_webhook(request):
             file_name = file_obj.get('file_name', 'video.mp4')
             file_size = file_obj.get('file_size', 0)
             
-            # Check file size
-            if file_size > 20 * 1024 * 1024:  # 20MB limit for bot API
-                await send_message(chat_id, "❌ File too large! Max: 20MB\n\nTip: Compress your video or use a shorter clip.")
-                return web.Response(text="OK")
+            # No longer checking file size limit - we'll compress if needed
             
             # Send initial message
+            size_info = f"💾 {file_size/(1024*1024):.1f}MB" if file_size > 0 else ""
             result = await send_message(chat_id, 
-                f"⚡ **Processing Started!**\n\n{create_progress_bar(0)}\n📁 {file_name}")
+                f"⚡ **Processing Started!**\n\n{create_progress_bar(0)}\n📁 {file_name}\n{size_info}")
             
             if result and 'result' in result:
                 message_id = result['result']['message_id']
