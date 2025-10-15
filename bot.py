@@ -49,10 +49,11 @@ def escape_markdown(text):
     if not isinstance(text, str):
         return ""
     
-    # List of characters to escape in Markdown V2
+    # List of ALL characters to escape in Markdown V2
+    # From Telegram docs: _ * [ ] ( ) ~ ` > # + - = | { } . !
     chars_to_escape = r'_*[]()~`>#+-=|{}.!'
     
-    # Use backslash to escape each character
+    # Escape each character with a backslash
     for char in chars_to_escape:
         text = text.replace(char, f'\\{char}')
     
@@ -64,14 +65,18 @@ def create_progress_bar(percentage, length=10):
     bar = "█" * filled + "░" * (length - filled)
     return f"[{bar}] {percentage:.0f}%"
 
-async def send_message(chat_id, text, reply_markup=None):
+async def send_message(chat_id, text, reply_markup=None, parse_mode="MarkdownV2"):
     """Send message via Telegram API with detailed error logging"""
     url = f"{TELEGRAM_API}/sendMessage"
     data = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "MarkdownV2" # Use MarkdownV2 for robust escaping
     }
+    
+    # Only add parse_mode if we're using markdown
+    if parse_mode:
+        data["parse_mode"] = parse_mode
+    
     if reply_markup:
         data["reply_markup"] = reply_markup
     
@@ -80,21 +85,31 @@ async def send_message(chat_id, text, reply_markup=None):
             result = await resp.json()
             if resp.status != 200 or not result.get('ok', False):
                 logger.error(f"Telegram API Error (sendMessage): Status={resp.status}, Body={result}")
+                # Fallback: try without markdown
+                if "can't parse entities" in str(result):
+                    data.pop("parse_mode", None)
+                    async with session.post(url, json=data, timeout=ClientTimeout(total=30)) as resp2:
+                        result2 = await resp2.json()
+                        if resp2.status == 200 and result2.get('ok', False):
+                            return result2
                 return None
             return result
     except Exception as e:
         logger.error(f"Send message exception: {e}")
         return None
 
-async def edit_message(chat_id, message_id, text, reply_markup=None):
+async def edit_message(chat_id, message_id, text, reply_markup=None, parse_mode="MarkdownV2"):
     """Edit message via Telegram API with detailed error logging"""
     url = f"{TELEGRAM_API}/editMessageText"
     data = {
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
-        "parse_mode": "MarkdownV2" # Use MarkdownV2 for robust escaping
     }
+    
+    if parse_mode:
+        data["parse_mode"] = parse_mode
+        
     if reply_markup:
         data["reply_markup"] = reply_markup
     
@@ -103,10 +118,18 @@ async def edit_message(chat_id, message_id, text, reply_markup=None):
             result = await resp.json()
             if resp.status != 200 and resp.status != 400: # 400 is common for "message not modified"
                 logger.error(f"Telegram API Error (editMessageText): Status={resp.status}, Body={result}")
+                # Fallback: try without markdown
+                if "can't parse entities" in str(result):
+                    data.pop("parse_mode", None)
+                    async with session.post(url, json=data, timeout=ClientTimeout(total=10)) as resp2:
+                        result2 = await resp2.json()
+                        if resp2.status == 200 and result2.get('ok', False):
+                            return result2
                 return None
             return result
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Edit message exception: {e}")
+        return None
 
 async def delete_message(chat_id, message_id):
     """Delete message with detailed error logging"""
@@ -119,16 +142,19 @@ async def delete_message(chat_id, message_id):
                 logger.warning(f"Telegram API Error (deleteMessage): Status={resp.status}, Body={result}")
                 return None
             return result
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Delete message exception: {e}")
+        return None
 
-async def send_photo(chat_id, photo_path, caption):
+async def send_photo(chat_id, photo_path, caption, parse_mode="MarkdownV2"):
     """Send photo via Telegram API with detailed error logging"""
     url = f"{TELEGRAM_API}/sendPhoto"
     data = FormData()
     data.add_field('chat_id', str(chat_id))
     data.add_field('caption', caption)
-    data.add_field('parse_mode', 'MarkdownV2')
+    
+    if parse_mode:
+        data.add_field('parse_mode', parse_mode)
     
     try:
         with open(photo_path, 'rb') as f:
@@ -143,7 +169,7 @@ async def send_photo(chat_id, photo_path, caption):
         logger.error(f"Send photo exception: {e}")
         return None
 
-async def send_media_group(chat_id, media_files):
+async def send_media_group(chat_id, media_files, parse_mode="MarkdownV2"):
     """Send media group with detailed error logging"""
     url = f"{TELEGRAM_API}/sendMediaGroup"
     
@@ -154,12 +180,15 @@ async def send_media_group(chat_id, media_files):
     files_to_close = []
     
     for idx, item in enumerate(media_files):
-        media_array.append({
+        media_item = {
             "type": "photo",
             "media": f"attach://photo{idx}",
             "caption": item['caption'],
-            "parse_mode": "MarkdownV2"
-        })
+        }
+        if parse_mode:
+            media_item["parse_mode"] = parse_mode
+            
+        media_array.append(media_item)
         f = open(item['path'], 'rb')
         files_to_close.append(f)
         data.add_field(f'photo{idx}', f, filename=f'photo{idx}.jpg')
@@ -188,8 +217,6 @@ async def send_media_group(chat_id, media_files):
 
 async def download_large_file(file_id, destination, chat_id, message_id):
     """Download large files with progress updates"""
-    # ... (Download logic remains the same)
-    # Note: Use escape_markdown on file names in status updates
     try:
         url = f"{TELEGRAM_API}/getFile"
         async with session.get(url, params={"file_id": file_id}, timeout=ClientTimeout(total=30)) as resp:
@@ -232,7 +259,6 @@ async def download_large_file(file_id, destination, chat_id, message_id):
 
 async def upload_to_catbox(file_path):
     """Upload to Catbox.moe"""
-    # ... (Upload logic remains the same)
     try:
         timeout = ClientTimeout(total=120)
         async with ClientSession(timeout=timeout) as sess:
@@ -313,7 +339,6 @@ async def optimize_video(input_path, output_path, strategy):
 # Re-using screenshot/thumbnail logic, ensuring video path is passed correctly
 def extract_screenshots_efficient(video_path, num_screenshots=5):
     """Efficient screenshot extraction with error handling"""
-    # ... (Screenshot logic remains the same)
     screenshots = []
     temp_dir = tempfile.mkdtemp()
     
@@ -372,7 +397,6 @@ def extract_screenshots_efficient(video_path, num_screenshots=5):
 
 def create_thumbnail(screenshot_paths, output_path):
     """Create thumbnail grid"""
-    # ... (Thumbnail logic remains the same)
     try:
         images = []
         for path in screenshot_paths[:5]:
@@ -466,7 +490,7 @@ async def process_video_final_steps(chat_id, video_path, original_file_name, ori
             caption = (
                 f"🎬 \\*\\*{escaped_file_name}\\*\\*\n"
                 f"⏱ {int(duration//60)}:{int(duration%60):02d}\n"
-                f"📦 Original: {original_file_size/(1024*1024):.1f} MB | Final: {current_size/(1024*1024):.1f} MB\n"
+                f"📦 Original: {original_file_size/(1024*1024):.1f} MB \\| Final: {current_size/(1024*1024):.1f} MB\n"
                 f"🔗 Processed successfully\\.\n"
             )
             if thumbnail_url:
@@ -669,14 +693,14 @@ async def handle_webhook(request):
                 
                 # --- Sanitize command responses with escape_markdown ---
                 if text == '/start':
-                    await send_message(chat_id, "\\*\\*Welcome to Advanced Screenshot Bot\\!\\*\\*\n\n📹 Send any video (up to 2GB) and I'll extract 5 screenshots and upload them to Catbox\\.moe\\.\n💡 Files over 20MB will require confirmation before processing\\.")
+                    await send_message(chat_id, "\\*\\*Welcome to Advanced Screenshot Bot\\!\\*\\*\n\n📹 Send any video \\(up to 2GB\\) and I'll extract 5 screenshots and upload them to Catbox\\.moe\\.\n💡 Files over 20MB will require confirmation before processing\\.")
                 elif text == '/help':
                     await send_message(chat_id, "🤖 \\*\\*How to use:\\*\\* Send me a video file\\. If it's over 20MB, I'll ask you to confirm and choose an optimization method before starting the download\\. All processing happens asynchronously in the background\\.")
                 elif text == '/stats':
                     total_count = await screenshots_collection.count_documents({})
                     user_count = await screenshots_collection.count_documents({"chat_id": chat_id})
                     large_files = await screenshots_collection.count_documents({"chat_id": chat_id, "large_file": True})
-                    await send_message(chat_id, f"📊 \\*\\*Your Stats\\*\\*\n\n✅ Your Videos: {user_count}\n📸 Your Screenshots: {user_count * 5}\n📦 Large Files (over 20MB): {large_files}\n🌐 Total Processed: {total_count}")
+                    await send_message(chat_id, f"📊 \\*\\*Your Stats\\*\\*\n\n✅ Your Videos: {user_count}\n📸 Your Screenshots: {user_count * 5}\n📦 Large Files \\(over 20MB\\): {large_files}\n🌐 Total Processed: {total_count}")
             
             elif 'video' in message or 'document' in message:
                 file_obj = message.get('video') or message.get('document')
@@ -802,4 +826,3 @@ app.on_cleanup.append(cleanup)
 if __name__ == '__main__':
     logger.info("🤖 Advanced Screenshot Bot Starting...")
     web.run_app(app, host='0.0.0.0', port=PORT)
-
