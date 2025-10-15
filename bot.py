@@ -23,7 +23,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8268736244:AAGwfDn1Hzlor58Sg5A7cczwxYwzRldVJ
 MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://confident-jemima-school1660440-5a325843.koyeb.app")
 PORT = int(os.getenv("PORT", 8000))
-CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php"
+CATBOX_UPLOAD_URL = "https://files.catbox.moe/user/api.php"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # Threshold for prompting the user for confirmation (20 MB)
@@ -41,30 +41,33 @@ session = None
 # --- Utility Functions ---
 
 def escape_markdown(text):
-    """Escape all markdown characters properly"""
+    """Escape markdown characters"""
     if not isinstance(text, str):
         return ""
-    
-    # Escape all special characters for MarkdownV2
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     for char in escape_chars:
         text = text.replace(char, f'\\{char}')
-    
     return text
 
 def safe_filename(text):
     """Extract just the filename without path for display"""
     if not isinstance(text, str):
         return "video.mp4"
-    
-    # Get just the filename
     filename = os.path.basename(text)
-    
-    # Remove problematic characters but keep it readable
     safe_chars = " .-_()[]"
     cleaned = ''.join(c for c in filename if c.isalnum() or c in safe_chars)
-    
     return cleaned if cleaned else "video.mp4"
+
+def format_file_size(size_bytes):
+    """Format file size in human readable format"""
+    if size_bytes == 0:
+        return "0 B"
+    size_names = ["B", "KB", "MB", "GB"]
+    i = 0
+    while size_bytes >= 1024 and i < len(size_names) - 1:
+        size_bytes /= 1024.0
+        i += 1
+    return f"{size_bytes:.1f} {size_names[i]}"
 
 def create_progress_bar(percentage, length=10):
     """Create visual progress bar"""
@@ -265,9 +268,9 @@ async def upload_to_catbox(file_path):
         logger.error(f"Catbox upload error: {e}")
     return None
 
-async def optimize_video(input_path, output_path, strategy):
-    """Optimize video using FFmpeg"""
-    logger.info(f"Starting optimization with strategy: {strategy}")
+async def reduce_video_size(input_path, output_path, reduction_percentage):
+    """Reduce video size by specified percentage using FFmpeg"""
+    logger.info(f"Starting size reduction: {reduction_percentage}%")
     
     if not os.path.exists(input_path):
         logger.error(f"Input file not found: {input_path}")
@@ -283,29 +286,52 @@ async def optimize_video(input_path, output_path, strategy):
         logger.warning(f"FFmpeg check failed: {e}, skipping optimization")
         return False
     
-    base_cmd = ['ffmpeg', '-i', input_path, '-y']
+    # Get original file size
+    original_size = os.path.getsize(input_path)
+    target_size = original_size * (1 - reduction_percentage / 100)
     
-    if strategy == 'fast':
-        cmd = base_cmd + [
-            '-c:v', 'libx264', '-crf', '28', '-preset', 'fast',
+    # Calculate target bitrate based on reduction percentage
+    duration = await get_video_duration(input_path)
+    if duration <= 0:
+        duration = 60  # Default to 1 minute if cannot determine
+    
+    target_bitrate = (target_size * 8) / (duration * 1000)  # kbps
+    
+    # Adjust video quality based on reduction percentage
+    if reduction_percentage == 30:
+        # Mild reduction - maintain good quality
+        cmd = [
+            'ffmpeg', '-i', input_path, '-y',
+            '-c:v', 'libx264', '-crf', '23', '-preset', 'medium',
             '-c:a', 'aac', '-b:a', '128k',
             '-movflags', '+faststart',
             output_path
         ]
-    elif strategy == 'quality':
-        cmd = base_cmd + [
-            '-vf', 'scale=1280:-2',  # Scale to 720p width
-            '-c:v', 'libx264', '-crf', '30', '-preset', 'medium',
+    elif reduction_percentage == 50:
+        # Medium reduction - balance quality and size
+        cmd = [
+            'ffmpeg', '-i', input_path, '-y',
+            '-c:v', 'libx264', '-crf', '28', '-preset', 'fast',
             '-c:a', 'aac', '-b:a', '96k',
             '-movflags', '+faststart',
             output_path
         ]
+    elif reduction_percentage == 70:
+        # Aggressive reduction - maximum size reduction
+        cmd = [
+            'ffmpeg', '-i', input_path, '-y',
+            '-vf', 'scale=854:-2',  # Scale to 480p
+            '-c:v', 'libx264', '-crf', '32', '-preset', 'veryfast',
+            '-c:a', 'aac', '-b:a', '64k',
+            '-movflags', '+faststart',
+            output_path
+        ]
     else:
-        logger.error(f"Unknown strategy: {strategy}")
+        logger.error(f"Invalid reduction percentage: {reduction_percentage}")
         return False
         
     try:
-        logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
+        logger.info(f"Running FFmpeg for {reduction_percentage}% reduction")
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=subprocess.PIPE,
@@ -315,10 +341,9 @@ async def optimize_video(input_path, output_path, strategy):
         stdout, stderr = await process.communicate()
         
         if process.returncode == 0 and os.path.exists(output_path):
-            original_size = os.path.getsize(input_path)
-            optimized_size = os.path.getsize(output_path)
-            reduction = ((original_size - optimized_size) / original_size) * 100
-            logger.info(f"Optimization successful: {optimized_size/(1024*1024):.1f}MB (reduced by {reduction:.1f}%)")
+            final_size = os.path.getsize(output_path)
+            actual_reduction = ((original_size - final_size) / original_size) * 100
+            logger.info(f"Size reduction successful: {final_size/(1024*1024):.1f}MB (reduced by {actual_reduction:.1f}%)")
             return True
         else:
             logger.error(f"FFmpeg failed with code {process.returncode}")
@@ -328,6 +353,30 @@ async def optimize_video(input_path, output_path, strategy):
     except Exception as e:
         logger.error(f"FFmpeg execution error: {e}")
         return False
+
+async def get_video_duration(video_path):
+    """Get video duration using FFprobe"""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_format', video_path
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode == 0:
+            info = json.loads(stdout.decode())
+            duration = float(info['format']['duration'])
+            return duration
+    except Exception as e:
+        logger.error(f"Error getting video duration: {e}")
+    
+    return 0
 
 def extract_screenshots_efficient(video_path, num_screenshots=5):
     """Extract screenshots from video at equal intervals"""
@@ -454,12 +503,6 @@ def create_comprehensive_thumbnail(video_path, output_path, num_frames=9):
             y = (idx // cols) * 150
             thumbnail.paste(img, (x, y))
         
-        # Add border and title
-        final_width = width + 20
-        final_height = height + 40
-        final_thumbnail = Image.new('RGB', (final_width, final_height), (30, 30, 30))
-        final_thumbnail.paste(thumbnail, (10, 30))
-        
         thumbnail.save(output_path, 'JPEG', quality=90)
         logger.info(f"Created comprehensive thumbnail with {len(frames)} frames")
         return output_path
@@ -468,38 +511,7 @@ def create_comprehensive_thumbnail(video_path, output_path, num_frames=9):
         logger.error(f"Comprehensive thumbnail error: {e}")
         return None
 
-def create_thumbnail(screenshot_paths, output_path):
-    """Create thumbnail grid from screenshots"""
-    try:
-        images = []
-        for path in screenshot_paths[:9]:  # Use up to 9 images
-            if os.path.exists(path):
-                img = Image.open(path)
-                img.thumbnail((200, 150), Image.Resampling.LANCZOS)
-                images.append(img)
-        
-        if not images:
-            return None
-        
-        cols = 3
-        rows = math.ceil(len(images) / cols)
-        width = 200 * cols
-        height = 150 * rows
-        
-        thumbnail = Image.new('RGB', (width, height), (0, 0, 0))
-        
-        for idx, img in enumerate(images):
-            x = (idx % cols) * 200
-            y = (idx // cols) * 150
-            thumbnail.paste(img, (x, y))
-        
-        thumbnail.save(output_path, 'JPEG', quality=85)
-        return output_path
-    except Exception as e:
-        logger.error(f"Thumbnail error: {e}")
-        return None
-
-async def process_video_final_steps(chat_id, video_path, original_file_name, original_file_size, message_id):
+async def process_video_final_steps(chat_id, video_path, original_file_name, original_file_size, message_id, reduction_percentage=None):
     """Final processing steps after download/optimization"""
     temp_dir = os.path.dirname(video_path)
     
@@ -531,14 +543,7 @@ async def process_video_final_steps(chat_id, video_path, original_file_name, ori
             create_comprehensive_thumbnail, video_path, comprehensive_thumbnail_path, 9
         )
         
-        # Also create regular thumbnail from screenshots
-        regular_thumbnail_path = os.path.join(temp_dir, "thumbnail.jpg")
-        regular_thumbnail = await asyncio.to_thread(
-            create_thumbnail, [s['path'] for s in screenshots], regular_thumbnail_path
-        )
-        
-        # Use comprehensive thumbnail if available, otherwise use regular
-        final_thumbnail_path = comprehensive_thumbnail_path if comprehensive_thumbnail else regular_thumbnail_path
+        final_thumbnail_path = comprehensive_thumbnail_path if comprehensive_thumbnail else None
         
         # Upload to Catbox
         await edit_message(chat_id, message_id, 
@@ -566,6 +571,7 @@ async def process_video_final_steps(chat_id, video_path, original_file_name, ori
                 "duration": duration,
                 "screenshot_urls": screenshot_urls,
                 "thumbnail_url": thumbnail_url,
+                "reduction_percentage": reduction_percentage,
                 "large_file": original_file_size > LARGE_FILE_THRESHOLD,
                 "timestamp": datetime.utcnow()
             })
@@ -578,16 +584,16 @@ async def process_video_final_steps(chat_id, video_path, original_file_name, ori
         
         # Send comprehensive thumbnail
         if final_thumbnail_path and os.path.exists(final_thumbnail_path):
-            size_reduction = ""
-            if current_size < original_file_size:
-                reduction = ((original_file_size - current_size) / original_file_size) * 100
-                size_reduction = f"📉 Reduced by {reduction:.1f}%\n"
+            size_info = ""
+            if reduction_percentage:
+                actual_reduction = ((original_file_size - current_size) / original_file_size) * 100
+                size_info = f"📉 Target Reduction: {reduction_percentage}%\n📊 Actual Reduction: {actual_reduction:.1f}%\n"
             
             caption = (
                 f"🎬 {safe_file_name}\n"
                 f"⏱ {int(duration//60)}:{int(duration%60):02d}\n"
-                f"📦 Original: {original_file_size/(1024*1024):.1f}MB | Final: {current_size/(1024*1024):.1f}MB\n"
-                f"{size_reduction}"
+                f"📦 Original: {format_file_size(original_file_size)} | Final: {format_file_size(current_size)}\n"
+                f"{size_info}"
                 f"🔗 {len(screenshot_urls)} screenshots uploaded"
             )
             if thumbnail_url:
@@ -610,11 +616,11 @@ async def process_video_final_steps(chat_id, video_path, original_file_name, ori
         
         # Send URL summary
         if screenshot_urls:
-            urls_text = "All Screenshot Links\n\n"
+            urls_text = "📸 *All Screenshot Links*\n\n"
             for i, url in enumerate(screenshot_urls, 1):
-                urls_text += f"{i}. {url}\n"
+                urls_text += f"{i}. `{url}`\n"
             
-            await send_message(chat_id, urls_text, parse_mode=None)
+            await send_message(chat_id, urls_text)
         
         await delete_message(chat_id, message_id)
         logger.info(f"Processing complete: {original_file_name}")
@@ -632,11 +638,11 @@ async def process_video_final_steps(chat_id, video_path, original_file_name, ori
             except Exception as e:
                 logger.error(f"Cleanup error: {e}")
 
-async def process_video_download_and_optimize(chat_id, file_id, file_name, file_size, message_id, optimization_strategy):
-    """Main processing function"""
+async def process_video_download_and_reduce(chat_id, file_id, file_name, file_size, message_id, reduction_percentage):
+    """Main processing function with size reduction"""
     temp_dir = tempfile.mkdtemp()
     original_path = os.path.join(temp_dir, f"original_{file_id}.mp4")
-    optimized_path = os.path.join(temp_dir, f"optimized_{file_id}.mp4")
+    reduced_path = os.path.join(temp_dir, f"reduced_{file_id}.mp4")
     
     try:
         safe_file_name = safe_filename(file_name)
@@ -645,34 +651,37 @@ async def process_video_download_and_optimize(chat_id, file_id, file_name, file_
         await edit_message(chat_id, message_id, 
             f"⬇️ Downloading File\n\n{create_progress_bar(0)}\n"
             f"📁 {safe_file_name}\n"
-            f"💾 {file_size/(1024*1024):.1f}MB")
+            f"💾 {format_file_size(file_size)}")
         
         if not await download_large_file(file_id, original_path, chat_id, message_id):
             await edit_message(chat_id, message_id, "❌ Download failed")
             return
         
         downloaded_size = os.path.getsize(original_path)
-        logger.info(f"Downloaded: {downloaded_size/(1024*1024):.1f}MB")
+        logger.info(f"Downloaded: {format_file_size(downloaded_size)}")
         
-        # Optimize if strategy is provided and file is large enough
+        # Reduce file size if percentage is specified
         final_path = original_path
         
-        if optimization_strategy and downloaded_size > 5 * 1024 * 1024:  # Only optimize >5MB files
+        if reduction_percentage and reduction_percentage > 0:
             await edit_message(chat_id, message_id, 
-                f"⚙️ Optimizing Video\n\n{create_progress_bar(40)}\n"
-                f"Strategy: {optimization_strategy}\n"
+                f"⚙️ Reducing File Size\n\n{create_progress_bar(40)}\n"
+                f"Target: {reduction_percentage}% reduction\n"
                 f"📁 {safe_file_name}")
             
-            if await optimize_video(original_path, optimized_path, optimization_strategy):
-                final_path = optimized_path
-                optimized_size = os.path.getsize(optimized_path)
-                reduction = ((downloaded_size - optimized_size) / downloaded_size) * 100
-                logger.info(f"Optimized: {optimized_size/(1024*1024):.1f}MB (reduced by {reduction:.1f}%)")
+            if await reduce_video_size(original_path, reduced_path, reduction_percentage):
+                final_path = reduced_path
+                reduced_size = os.path.getsize(reduced_path)
+                actual_reduction = ((downloaded_size - reduced_size) / downloaded_size) * 100
+                logger.info(f"Size reduced: {format_file_size(reduced_size)} (reduced by {actual_reduction:.1f}%)")
             else:
-                logger.warning("Optimization failed, using original file")
+                logger.warning("Size reduction failed, using original file")
+                await edit_message(chat_id, message_id, 
+                    f"⚠️ Size reduction failed\nUsing original file\n\n"
+                    f"📁 {safe_file_name}")
         
         # Process final steps
-        await process_video_final_steps(chat_id, final_path, file_name, file_size, message_id)
+        await process_video_final_steps(chat_id, final_path, file_name, file_size, message_id, reduction_percentage)
         
     except Exception as e:
         logger.error(f"Processing error: {e}")
@@ -698,41 +707,10 @@ async def handle_callback_query(update):
     
     logger.info(f"Callback received: {data}")
     
-    if data.startswith('confirm_'):
-        file_id = data.split('_')[1]
-        
-        # Find file metadata
-        file_metadata = await pending_files_collection.find_one({"file_id": file_id})
-        if not file_metadata:
-            await edit_message(chat_id, message_id, "❌ File data expired")
-            return
-
-        file_name = file_metadata['file_name']
-        file_size = file_metadata['file_size']
-        safe_name = safe_filename(file_name)
-        
-        # Show optimization options
-        fast_data = f'optimize_fast_{file_id}'
-        quality_data = f'optimize_quality_{file_id}'
-        
-        reply_markup = {
-            "inline_keyboard": [
-                [{"text": "🚀 Fast (Quick)", "callback_data": fast_data}],
-                [{"text": "📉 Quality (Smaller)", "callback_data": quality_data}]
-            ]
-        }
-        
-        await edit_message(chat_id, message_id,
-            f"⚙️ Choose Optimization\n\n"
-            f"File: {safe_name}\n"
-            f"Size: {file_size/(1024*1024):.1f}MB\n\n"
-            f"Select optimization method:",
-            reply_markup=reply_markup)
-        
-    elif data.startswith('optimize_'):
+    if data.startswith('reduce_'):
         parts = data.split('_')
         if len(parts) >= 3:
-            strategy = parts[1]
+            reduction_percentage = int(parts[1])
             file_id = parts[2]
             
             # Get file metadata and delete from pending
@@ -746,13 +724,34 @@ async def handle_callback_query(update):
             safe_name = safe_filename(file_name)
             
             await edit_message(chat_id, message_id, 
-                f"✅ Starting with {strategy} optimization\n"
-                f"📁 {safe_name}")
+                f"✅ Starting {reduction_percentage}% size reduction\n"
+                f"📁 {safe_name}\n"
+                f"📦 Original size: {format_file_size(file_size)}")
             
-            # Start processing
+            # Start processing with size reduction
             asyncio.create_task(
-                process_video_download_and_optimize(
-                    chat_id, file_id, file_name, file_size, message_id, strategy
+                process_video_download_and_reduce(
+                    chat_id, file_id, file_name, file_size, message_id, reduction_percentage
+                )
+            )
+    
+    elif data == 'process_without_reduction':
+        # Handle processing without size reduction
+        file_metadata = await pending_files_collection.find_one({"chat_id": chat_id})
+        if file_metadata:
+            file_id = file_metadata['file_id']
+            file_name = file_metadata['file_name']
+            file_size = file_metadata['file_size']
+            
+            await pending_files_collection.delete_one({"file_id": file_id})
+            
+            await edit_message(chat_id, message_id, 
+                f"✅ Starting processing without size reduction\n"
+                f"📁 {safe_filename(file_name)}")
+            
+            asyncio.create_task(
+                process_video_download_and_reduce(
+                    chat_id, file_id, file_name, file_size, message_id, None
                 )
             )
 
@@ -772,24 +771,32 @@ async def handle_webhook(request):
                 
                 if text == '/start':
                     await send_message(chat_id, 
-                        "Welcome to Screenshot Bot!\n\n"
-                        "Send me any video file and I'll extract screenshots for you.\n"
-                        "Files over 20MB will require confirmation.")
+                        "🎬 *Welcome to Video Screenshot Bot!*\n\n"
+                        "I can help you:\n"
+                        "• Extract screenshots from videos\n"
+                        "• Reduce video file size\n"
+                        "• Upload screenshots to cloud\n\n"
+                        "Simply send me any video file to get started!")
                 elif text == '/help':
                     await send_message(chat_id, 
-                        "How to use:\n"
+                        "📖 *How to use this bot:*\n\n"
                         "1. Send a video file\n"
-                        "2. For large files (>20MB), confirm processing\n"
-                        "3. Wait for screenshots\n\n"
-                        "The bot will upload screenshots to Catbox.moe")
+                        "2. For files over 20MB, choose size reduction option\n"
+                        "3. Wait for processing\n"
+                        "4. Get screenshots and download links\n\n"
+                        "*Size Reduction Options:*\n"
+                        "• 30% - Good quality, mild reduction\n"
+                        "• 50% - Balanced quality and size\n"
+                        "• 70% - Maximum size reduction\n\n"
+                        "All screenshots are uploaded to Catbox.moe for easy sharing!")
                 elif text == '/stats':
                     total = await screenshots_collection.count_documents({})
                     user_total = await screenshots_collection.count_documents({"chat_id": chat_id})
                     await send_message(chat_id, 
-                        f"Your Stats:\n"
-                        f"Videos processed: {user_total}\n"
-                        f"Total screenshots: {user_total * 5}\n"
-                        f"Global total: {total}")
+                        f"📊 *Your Statistics:*\n"
+                        f"• Videos processed: {user_total}\n"
+                        f"• Total screenshots: {user_total * 5}\n"
+                        f"• Global total: {total}")
             
             # Handle video/files
             elif 'video' in message or 'document' in message:
@@ -804,54 +811,63 @@ async def handle_webhook(request):
                 if 'document' in message:
                     mime_type = file_obj.get('mime_type', '')
                     if not mime_type.startswith('video/'):
-                        await send_message(chat_id, "❌ Please send a video file")
+                        await send_message(chat_id, "❌ Please send a video file (MP4, AVI, MKV, etc.)")
                         return web.Response(text="OK")
                 
                 safe_name = safe_filename(file_name)
+                formatted_size = format_file_size(file_size)
+                
+                # Store file info for callback
+                await pending_files_collection.update_one(
+                    {"file_id": file_id},
+                    {"$set": {
+                        "chat_id": chat_id,
+                        "file_name": file_name,
+                        "file_size": file_size,
+                        "timestamp": datetime.utcnow()
+                    }},
+                    upsert=True
+                )
                 
                 if file_size > LARGE_FILE_THRESHOLD:
-                    # Store file info for callback
-                    await pending_files_collection.update_one(
-                        {"file_id": file_id},
-                        {"$set": {
-                            "chat_id": chat_id,
-                            "file_name": file_name,
-                            "file_size": file_size,
-                            "timestamp": datetime.utcnow()
-                        }},
-                        upsert=True
-                    )
-                    
-                    # Send confirmation button
-                    callback_data = f"confirm_{file_id}"
+                    # Large file - show size reduction options
                     reply_markup = {
-                        "inline_keyboard": [[
-                            {
-                                "text": f"✅ Process ({file_size/(1024*1024):.1f}MB)",
-                                "callback_data": callback_data
-                            }
-                        ]]
+                        "inline_keyboard": [
+                            [
+                                {"text": "🔻 Reduce 30% (Good Quality)", "callback_data": f"reduce_30_{file_id}"},
+                                {"text": "🔻 Reduce 50% (Balanced)", "callback_data": f"reduce_50_{file_id}"}
+                            ],
+                            [
+                                {"text": "🔻 Reduce 70% (Maximum)", "callback_data": f"reduce_70_{file_id}"},
+                                {"text": "⚡ Process Original", "callback_data": "process_without_reduction"}
+                            ]
+                        ]
                     }
                     
                     await send_message(chat_id,
-                        f"⚠️ Large File Detected\n\n"
-                        f"File: {safe_name}\n"
-                        f"Size: {file_size/(1024*1024):.1f}MB\n\n"
-                        f"Please confirm to start processing:",
+                        f"📦 *Large File Detected*\n\n"
+                        f"📁 *File:* {safe_name}\n"
+                        f"💾 *Size:* {formatted_size}\n\n"
+                        f"Choose size reduction option:\n"
+                        f"• *30%* - Mild reduction, best quality\n"
+                        f"• *50%* - Balanced quality/size\n"
+                        f"• *70%* - Maximum size reduction\n"
+                        f"• *Original* - No size reduction",
                         reply_markup=reply_markup)
                     
                 else:
-                    # Small file - process immediately
+                    # Small file - process immediately without reduction
                     result = await send_message(chat_id,
-                        f"⚡ Processing Started\n\n{create_progress_bar(0)}\n"
+                        f"⚡ *Processing Started*\n\n{create_progress_bar(0)}\n"
                         f"📁 {safe_name}\n"
-                        f"Size: {file_size/(1024*1024):.1f}MB")
+                        f"💾 Size: {formatted_size}\n\n"
+                        f"⏳ Extracting screenshots...")
                     
                     if result and 'result' in result:
                         message_id = result['result']['message_id']
                         asyncio.create_task(
-                            process_video_download_and_optimize(
-                                chat_id, file_id, file_name, file_size, message_id, 'fast'
+                            process_video_download_and_reduce(
+                                chat_id, file_id, file_name, file_size, message_id, None
                             )
                         )
         
@@ -865,11 +881,13 @@ async def handle_webhook(request):
         return web.Response(text="OK")
 
 async def health_check(request):
-    return web.Response(text="OK")
+    """Health check endpoint"""
+    return web.Response(text="OK", status=200)
 
 async def setup_webhook():
     """Setup webhook on startup"""
     if not WEBHOOK_URL:
+        logger.error("WEBHOOK_URL not set!")
         return
         
     webhook_url = f"{WEBHOOK_URL}/webhook"
@@ -884,15 +902,20 @@ async def setup_webhook():
         logger.error(f"Webhook setup error: {e}")
 
 async def start_server(app):
+    """Startup function"""
     global session
     session = ClientSession()
     await setup_webhook()
-    logger.info("Bot started")
+    logger.info("🤖 Video Screenshot Bot started successfully!")
+    logger.info(f"🌐 Webhook URL: {WEBHOOK_URL}")
+    logger.info(f"🚀 Server running on port: {PORT}")
 
 async def cleanup(app):
+    """Cleanup function"""
     if session:
         await session.close()
 
+# Create app
 app = web.Application()
 app.router.add_post('/webhook', handle_webhook)
 app.router.add_get('/health', health_check)
@@ -901,4 +924,5 @@ app.on_startup.append(start_server)
 app.on_cleanup.append(cleanup)
 
 if __name__ == '__main__':
+    logger.info("🎬 Starting Video Screenshot Bot...")
     web.run_app(app, host='0.0.0.0', port=PORT)
