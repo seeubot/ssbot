@@ -13,6 +13,7 @@ import json
 import requests
 from urllib.parse import urlparse
 import shutil
+import hashlib
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -75,6 +76,10 @@ def create_progress_bar(percentage, length=10):
     bar = "█" * filled + "░" * (length - filled)
     return f"[{bar}] {percentage:.0f}%"
 
+def generate_file_hash(file_id):
+    """Generate short hash for file_id to use in callback data"""
+    return hashlib.md5(file_id.encode()).hexdigest()[:8]
+
 async def send_message(chat_id, text, reply_markup=None, parse_mode="MarkdownV2"):
     """Send message via Telegram API"""
     url = f"{TELEGRAM_API}/sendMessage"
@@ -100,7 +105,7 @@ async def send_message(chat_id, text, reply_markup=None, parse_mode="MarkdownV2"
             if not result.get('ok'):
                 logger.error(f"Send message error: {result}")
                 # Retry without markdown if it fails
-                if parse_mode:
+                if parse_mode and "can't parse entities" in str(result):
                     data.pop("parse_mode")
                     async with session.post(url, json=data, timeout=ClientTimeout(total=30)) as resp2:
                         return await resp2.json()
@@ -288,14 +293,6 @@ async def reduce_video_size(input_path, output_path, reduction_percentage):
     
     # Get original file size
     original_size = os.path.getsize(input_path)
-    target_size = original_size * (1 - reduction_percentage / 100)
-    
-    # Calculate target bitrate based on reduction percentage
-    duration = await get_video_duration(input_path)
-    if duration <= 0:
-        duration = 60  # Default to 1 minute if cannot determine
-    
-    target_bitrate = (target_size * 8) / (duration * 1000)  # kbps
     
     # Adjust video quality based on reduction percentage
     if reduction_percentage == 30:
@@ -707,53 +704,65 @@ async def handle_callback_query(update):
     
     logger.info(f"Callback received: {data}")
     
-    if data.startswith('reduce_'):
-        parts = data.split('_')
-        if len(parts) >= 3:
-            reduction_percentage = int(parts[1])
-            file_id = parts[2]
-            
-            # Get file metadata and delete from pending
-            file_metadata = await pending_files_collection.find_one_and_delete({"file_id": file_id})
-            if not file_metadata:
-                await edit_message(chat_id, message_id, "❌ File data expired")
-                return
+    if data.startswith('r30_') or data.startswith('r50_') or data.startswith('r70_'):
+        # Parse reduction callback
+        reduction_char = data[1]  # Get '3', '5', or '7'
+        file_hash = data[3:]      # Get the file hash
+        
+        reduction_percentage = int(reduction_char + '0')  # Convert to 30, 50, 70
+        
+        # Find file by hash
+        file_metadata = await pending_files_collection.find_one({"file_hash": file_hash})
+        if not file_metadata:
+            await edit_message(chat_id, message_id, "❌ File data expired or invalid")
+            return
 
-            file_name = file_metadata['file_name']
-            file_size = file_metadata['file_size']
-            safe_name = safe_filename(file_name)
-            
-            await edit_message(chat_id, message_id, 
-                f"✅ Starting {reduction_percentage}% size reduction\n"
-                f"📁 {safe_name}\n"
-                f"📦 Original size: {format_file_size(file_size)}")
-            
-            # Start processing with size reduction
-            asyncio.create_task(
-                process_video_download_and_reduce(
-                    chat_id, file_id, file_name, file_size, message_id, reduction_percentage
-                )
+        file_id = file_metadata['file_id']
+        file_name = file_metadata['file_name']
+        file_size = file_metadata['file_size']
+        safe_name = safe_filename(file_name)
+        
+        # Delete from pending collection
+        await pending_files_collection.delete_one({"file_hash": file_hash})
+        
+        await edit_message(chat_id, message_id, 
+            f"✅ Starting {reduction_percentage}% size reduction\n"
+            f"📁 {safe_name}\n"
+            f"📦 Original size: {format_file_size(file_size)}")
+        
+        # Start processing with size reduction
+        asyncio.create_task(
+            process_video_download_and_reduce(
+                chat_id, file_id, file_name, file_size, message_id, reduction_percentage
             )
+        )
     
-    elif data == 'process_without_reduction':
-        # Handle processing without size reduction
-        file_metadata = await pending_files_collection.find_one({"chat_id": chat_id})
-        if file_metadata:
-            file_id = file_metadata['file_id']
-            file_name = file_metadata['file_name']
-            file_size = file_metadata['file_size']
-            
-            await pending_files_collection.delete_one({"file_id": file_id})
-            
-            await edit_message(chat_id, message_id, 
-                f"✅ Starting processing without size reduction\n"
-                f"📁 {safe_filename(file_name)}")
-            
-            asyncio.create_task(
-                process_video_download_and_reduce(
-                    chat_id, file_id, file_name, file_size, message_id, None
-                )
+    elif data.startswith('proc_'):
+        # Process without reduction
+        file_hash = data[5:]  # Get the file hash
+        
+        # Find file by hash
+        file_metadata = await pending_files_collection.find_one({"file_hash": file_hash})
+        if not file_metadata:
+            await edit_message(chat_id, message_id, "❌ File data expired or invalid")
+            return
+
+        file_id = file_metadata['file_id']
+        file_name = file_metadata['file_name']
+        file_size = file_metadata['file_size']
+        
+        # Delete from pending collection
+        await pending_files_collection.delete_one({"file_hash": file_hash})
+        
+        await edit_message(chat_id, message_id, 
+            f"✅ Starting processing without size reduction\n"
+            f"📁 {safe_filename(file_name)}")
+        
+        asyncio.create_task(
+            process_video_download_and_reduce(
+                chat_id, file_id, file_name, file_size, message_id, None
             )
+        )
 
 async def handle_webhook(request):
     """Main webhook handler"""
@@ -817,6 +826,9 @@ async def handle_webhook(request):
                 safe_name = safe_filename(file_name)
                 formatted_size = format_file_size(file_size)
                 
+                # Generate short hash for callback data
+                file_hash = generate_file_hash(file_id)
+                
                 # Store file info for callback
                 await pending_files_collection.update_one(
                     {"file_id": file_id},
@@ -824,6 +836,7 @@ async def handle_webhook(request):
                         "chat_id": chat_id,
                         "file_name": file_name,
                         "file_size": file_size,
+                        "file_hash": file_hash,
                         "timestamp": datetime.utcnow()
                     }},
                     upsert=True
@@ -834,12 +847,12 @@ async def handle_webhook(request):
                     reply_markup = {
                         "inline_keyboard": [
                             [
-                                {"text": "🔻 Reduce 30% (Good Quality)", "callback_data": f"reduce_30_{file_id}"},
-                                {"text": "🔻 Reduce 50% (Balanced)", "callback_data": f"reduce_50_{file_id}"}
+                                {"text": "🔻 Reduce 30%", "callback_data": f"r30_{file_hash}"},
+                                {"text": "🔻 Reduce 50%", "callback_data": f"r50_{file_hash}"}
                             ],
                             [
-                                {"text": "🔻 Reduce 70% (Maximum)", "callback_data": f"reduce_70_{file_id}"},
-                                {"text": "⚡ Process Original", "callback_data": "process_without_reduction"}
+                                {"text": "🔻 Reduce 70%", "callback_data": f"r70_{file_hash}"},
+                                {"text": "⚡ Process Original", "callback_data": f"proc_{file_hash}"}
                             ]
                         ]
                     }
