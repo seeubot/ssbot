@@ -13,15 +13,13 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Bot Configuration
-BOT_TOKEN = "8268736244:AAGwfDn1Hzlor58Sg5A7cczwxYwzRldVJNY"
-API_ID = 23054736
-API_HASH = "d538c2e1a687d414f5c3dce7bf4a743c"
-MONGO_URI = "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie"
+# Environment variables (set in Koyeb)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8268736244:AAGwfDn1Hzlor58Sg5A7cczwxYwzRldVJNY")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://confident-jemima-school1660440-5a325843.koyeb.app")  # Will be set automatically by Koyeb
+PORT = int(os.getenv("PORT", 8000))
 CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-WEBHOOK_URL = "https://confident-jemima-school1660440-5a325843.koyeb.app"  # Change this to your domain
-PORT = 8080
 
 # Initialize MongoDB
 mongo_client = AsyncIOMotorClient(MONGO_URI)
@@ -49,8 +47,12 @@ async def send_message(chat_id, text, reply_markup=None):
     if reply_markup:
         data["reply_markup"] = reply_markup
     
-    async with session.post(url, json=data) as resp:
-        return await resp.json()
+    try:
+        async with session.post(url, json=data, timeout=ClientTimeout(total=30)) as resp:
+            return await resp.json()
+    except Exception as e:
+        logger.error(f"Send message error: {e}")
+        return None
 
 async def edit_message(chat_id, message_id, text):
     """Edit message via Telegram API"""
@@ -62,7 +64,7 @@ async def edit_message(chat_id, message_id, text):
         "parse_mode": "Markdown"
     }
     try:
-        async with session.post(url, json=data) as resp:
+        async with session.post(url, json=data, timeout=ClientTimeout(total=10)) as resp:
             return await resp.json()
     except:
         pass
@@ -72,7 +74,7 @@ async def delete_message(chat_id, message_id):
     url = f"{TELEGRAM_API}/deleteMessage"
     data = {"chat_id": chat_id, "message_id": message_id}
     try:
-        async with session.post(url, json=data) as resp:
+        async with session.post(url, json=data, timeout=ClientTimeout(total=10)) as resp:
             return await resp.json()
     except:
         pass
@@ -85,57 +87,68 @@ async def send_photo(chat_id, photo_path, caption):
     data.add_field('caption', caption)
     data.add_field('parse_mode', 'Markdown')
     
-    with open(photo_path, 'rb') as f:
-        data.add_field('photo', f, filename='photo.jpg')
-        async with session.post(url, data=data) as resp:
-            return await resp.json()
+    try:
+        with open(photo_path, 'rb') as f:
+            data.add_field('photo', f, filename='photo.jpg')
+            async with session.post(url, data=data, timeout=ClientTimeout(total=60)) as resp:
+                return await resp.json()
+    except Exception as e:
+        logger.error(f"Send photo error: {e}")
+        return None
 
 async def send_media_group(chat_id, media_files):
     """Send media group"""
     url = f"{TELEGRAM_API}/sendMediaGroup"
-    data = FormData()
-    data.add_field('chat_id', str(chat_id))
     
-    media_array = []
-    for idx, item in enumerate(media_files):
-        media_array.append({
-            "type": "photo",
-            "media": f"attach://photo{idx}",
-            "caption": item['caption']
-        })
-        data.add_field(f'photo{idx}', open(item['path'], 'rb'), filename=f'photo{idx}.jpg')
-    
-    import json
-    data.add_field('media', json.dumps(media_array))
-    
-    async with session.post(url, data=data) as resp:
-        result = await resp.json()
-    
-    # Close file handles
-    for item in media_files:
-        try:
-            os.close(item['path'])
-        except:
-            pass
-    
-    return result
+    try:
+        data = FormData()
+        data.add_field('chat_id', str(chat_id))
+        
+        media_array = []
+        files_to_close = []
+        
+        for idx, item in enumerate(media_files):
+            media_array.append({
+                "type": "photo",
+                "media": f"attach://photo{idx}",
+                "caption": item['caption']
+            })
+            f = open(item['path'], 'rb')
+            files_to_close.append(f)
+            data.add_field(f'photo{idx}', f, filename=f'photo{idx}.jpg')
+        
+        import json
+        data.add_field('media', json.dumps(media_array))
+        
+        async with session.post(url, data=data, timeout=ClientTimeout(total=120)) as resp:
+            result = await resp.json()
+        
+        # Close file handles
+        for f in files_to_close:
+            f.close()
+        
+        return result
+    except Exception as e:
+        logger.error(f"Send media group error: {e}")
+        return None
 
 async def download_file(file_id, destination):
     """Download file from Telegram"""
     try:
         # Get file path
         url = f"{TELEGRAM_API}/getFile"
-        async with session.get(url, params={"file_id": file_id}) as resp:
+        async with session.get(url, params={"file_id": file_id}, timeout=ClientTimeout(total=30)) as resp:
             result = await resp.json()
             
         if not result.get('ok'):
+            logger.error(f"Get file failed: {result}")
             return False
         
         file_path = result['result']['file_path']
         download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
         
-        # Download file with progress
-        async with session.get(download_url) as resp:
+        # Download file
+        async with session.get(download_url, timeout=ClientTimeout(total=600)) as resp:
             if resp.status == 200:
                 with open(destination, 'wb') as f:
                     total = int(resp.headers.get('content-length', 0))
@@ -143,7 +156,7 @@ async def download_file(file_id, destination):
                     async for chunk in resp.content.iter_chunked(8192):
                         f.write(chunk)
                         downloaded += len(chunk)
-                        if total > 0:
+                        if total > 0 and downloaded % (1024 * 1024) == 0:  # Log every MB
                             progress = (downloaded / total) * 100
                             logger.info(f"Download progress: {progress:.1f}%")
                 return True
@@ -250,6 +263,8 @@ async def process_video(chat_id, file_id, file_name, file_size, message_id):
     video_path = None
     
     try:
+        logger.info(f"Processing started for {file_name}")
+        
         # Update status
         await edit_message(chat_id, message_id, 
             f"⬇️ **Downloading**\n\n{create_progress_bar(0)}\n📁 {file_name}")
@@ -258,11 +273,10 @@ async def process_video(chat_id, file_id, file_name, file_size, message_id):
         temp_dir = tempfile.mkdtemp()
         video_path = os.path.join(temp_dir, f"video_{file_id}.mp4")
         
-        logger.info(f"Starting download: {file_name}")
         download_success = await download_file(file_id, video_path)
         
-        if not download_success:
-            await edit_message(chat_id, message_id, "❌ Download failed!")
+        if not download_success or not os.path.exists(video_path):
+            await edit_message(chat_id, message_id, "❌ Download failed! File might be too large (>20MB).")
             return
         
         await edit_message(chat_id, message_id, 
@@ -289,24 +303,27 @@ async def process_video(chat_id, file_id, file_name, file_size, message_id):
         
         results = await asyncio.gather(*upload_tasks, return_exceptions=True)
         screenshot_urls = [url for url in results[:5] if isinstance(url, str) and url]
-        thumbnail_url = results[-1] if thumbnail_created and len(results) > 5 else None
+        thumbnail_url = results[-1] if thumbnail_created and len(results) > 5 and isinstance(results[-1], str) else None
         
         # Save to MongoDB
-        await screenshots_collection.insert_one({
-            "chat_id": chat_id,
-            "file_name": file_name,
-            "file_size": file_size,
-            "duration": duration,
-            "screenshot_urls": screenshot_urls,
-            "thumbnail_url": thumbnail_url,
-            "timestamp": datetime.utcnow()
-        })
+        try:
+            await screenshots_collection.insert_one({
+                "chat_id": chat_id,
+                "file_name": file_name,
+                "file_size": file_size,
+                "duration": duration,
+                "screenshot_urls": screenshot_urls,
+                "thumbnail_url": thumbnail_url,
+                "timestamp": datetime.utcnow()
+            })
+        except Exception as e:
+            logger.error(f"MongoDB error: {e}")
         
         await edit_message(chat_id, message_id, 
             f"✅ **Complete!**\n\n{create_progress_bar(100)}")
         
         # Send thumbnail
-        if thumbnail_created:
+        if thumbnail_created and os.path.exists(thumbnail_path):
             caption = (
                 f"🎬 **{file_name}**\n"
                 f"⏱ {int(duration//60)}:{int(duration%60):02d}\n"
@@ -331,23 +348,30 @@ async def process_video(chat_id, file_id, file_name, file_size, message_id):
         
         # Send URL summary
         if screenshot_urls:
-            urls_text = "🔗 **Direct Links:**\n\n"
+            urls_text = "🔗 **All Links:**\n\n"
             for i, url in enumerate(screenshot_urls, 1):
                 urls_text += f"{i}. {url}\n"
             await send_message(chat_id, urls_text)
         
         await delete_message(chat_id, message_id)
+        logger.info(f"Processing complete for {file_name}")
         
     except Exception as e:
         logger.error(f"Processing error: {e}")
-        await edit_message(chat_id, message_id, f"❌ Error: {str(e)[:100]}")
+        try:
+            await edit_message(chat_id, message_id, f"❌ Error: {str(e)[:100]}")
+        except:
+            pass
     
     finally:
         # Cleanup
         if temp_dir and os.path.exists(temp_dir):
             try:
                 for f in os.listdir(temp_dir):
-                    os.remove(os.path.join(temp_dir, f))
+                    try:
+                        os.remove(os.path.join(temp_dir, f))
+                    except:
+                        pass
                 os.rmdir(temp_dir)
             except:
                 pass
@@ -356,7 +380,7 @@ async def handle_webhook(request):
     """Handle incoming webhook"""
     try:
         data = await request.json()
-        logger.info(f"Received update: {data}")
+        logger.info(f"Received update")
         
         if 'message' not in data:
             return web.Response(text="OK")
@@ -370,26 +394,27 @@ async def handle_webhook(request):
             
             if text == '/start':
                 await send_message(chat_id,
-                    "👋 **Welcome!**\n\n"
+                    "👋 **Welcome to Screenshot Bot!**\n\n"
                     "📹 Send video → Get 5 screenshots\n"
                     "🔗 Catbox.moe hosting\n"
-                    "⚡ Instant processing\n\n"
-                    "Commands:\n/start /help /stats")
+                    "⚡ Fast processing\n\n"
+                    "Commands: /start /help /stats")
                 
             elif text == '/help':
                 await send_message(chat_id,
-                    "🤖 **How to use:**\n"
+                    "🤖 **How to use:**\n\n"
                     "1. Send video file\n"
                     "2. Wait for processing\n"
                     "3. Get screenshots + URLs\n\n"
-                    "📦 Max: 2GB")
+                    "📦 Max: 20MB (Telegram limit)\n"
+                    "🎬 Formats: MP4, MKV, AVI, MOV, etc.")
                 
             elif text == '/stats':
                 count = await screenshots_collection.count_documents({"chat_id": chat_id})
                 await send_message(chat_id,
                     f"📊 **Your Stats**\n\n"
-                    f"Videos: {count}\n"
-                    f"Screenshots: {count * 5}")
+                    f"✅ Videos: {count}\n"
+                    f"📸 Screenshots: {count * 5}")
         
         # Handle video
         elif 'video' in message or 'document' in message:
@@ -398,7 +423,9 @@ async def handle_webhook(request):
             # Validate video
             if 'document' in message:
                 mime = file_obj.get('mime_type', '')
-                if not mime.startswith('video/'):
+                fname = file_obj.get('file_name', '')
+                video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm', '.m4v')
+                if not (mime.startswith('video/') or fname.lower().endswith(video_exts)):
                     await send_message(chat_id, "❌ Please send a video file!")
                     return web.Response(text="OK")
             
@@ -406,46 +433,55 @@ async def handle_webhook(request):
             file_name = file_obj.get('file_name', 'video.mp4')
             file_size = file_obj.get('file_size', 0)
             
+            # Check file size
+            if file_size > 20 * 1024 * 1024:  # 20MB limit for bot API
+                await send_message(chat_id, "❌ File too large! Max: 20MB\n\nTip: Compress your video or use a shorter clip.")
+                return web.Response(text="OK")
+            
             # Send initial message
             result = await send_message(chat_id, 
-                f"⚡ **Processing Started!**\n\n{create_progress_bar(0)}")
-            message_id = result['result']['message_id']
+                f"⚡ **Processing Started!**\n\n{create_progress_bar(0)}\n📁 {file_name}")
             
-            # Queue processing
-            await queue_collection.insert_one({
-                "chat_id": chat_id,
-                "file_id": file_id,
-                "file_name": file_name,
-                "file_size": file_size,
-                "message_id": message_id,
-                "status": "queued",
-                "timestamp": datetime.utcnow()
-            })
-            
-            # Process immediately in background
-            asyncio.create_task(process_video(chat_id, file_id, file_name, file_size, message_id))
+            if result and 'result' in result:
+                message_id = result['result']['message_id']
+                
+                # Process immediately in background
+                asyncio.create_task(process_video(chat_id, file_id, file_name, file_size, message_id))
         
         return web.Response(text="OK")
         
     except Exception as e:
         logger.error(f"Webhook error: {e}")
-        return web.Response(text="ERROR", status=500)
+        return web.Response(text="OK")  # Always return OK to Telegram
+
+async def health_check(request):
+    """Health check endpoint for Koyeb"""
+    return web.Response(text="OK", status=200)
 
 async def setup_webhook():
     """Setup webhook"""
-    url = f"{TELEGRAM_API}/setWebhook"
-    data = {"url": WEBHOOK_URL}
+    if not WEBHOOK_URL:
+        logger.error("WEBHOOK_URL not set! Please set it in Koyeb environment variables.")
+        return
     
-    async with session.post(url, json=data) as resp:
-        result = await resp.json()
-        logger.info(f"Webhook setup: {result}")
+    webhook_endpoint = f"{WEBHOOK_URL}/webhook"
+    url = f"{TELEGRAM_API}/setWebhook"
+    data = {"url": webhook_endpoint}
+    
+    try:
+        async with session.post(url, json=data, timeout=ClientTimeout(total=30)) as resp:
+            result = await resp.json()
+            logger.info(f"Webhook setup: {result}")
+    except Exception as e:
+        logger.error(f"Webhook setup error: {e}")
 
 async def start_server(app):
     """Startup"""
     global session
     session = ClientSession()
     await setup_webhook()
-    logger.info(f"Server started on port {PORT}")
+    logger.info(f"🚀 Server started on port {PORT}")
+    logger.info(f"📡 Webhook URL: {WEBHOOK_URL}")
 
 async def cleanup(app):
     """Cleanup"""
@@ -455,9 +491,11 @@ async def cleanup(app):
 # Create app
 app = web.Application()
 app.router.add_post('/webhook', handle_webhook)
+app.router.add_get('/health', health_check)
+app.router.add_get('/', health_check)
 app.on_startup.append(start_server)
 app.on_cleanup.append(cleanup)
 
 if __name__ == '__main__':
-    logger.info("🚀 Starting Webhook Bot...")
+    logger.info("🤖 Screenshot Bot Starting...")
     web.run_app(app, host='0.0.0.0', port=PORT)
