@@ -646,12 +646,14 @@ def webhook():
         return jsonify({"status": "error"}), 500
 
 # -------------------------------------------------------------
-# --- BACKGROUND TASKS (FIXED) ---
+# --- BACKGROUND TASKS (FIXED: Added global keyword) ---
 # -------------------------------------------------------------
 
 def flush_view_cache():
     """Periodically flush view count cache to database."""
-    global view_count_cache # Explicitly declare global to modify the dictionary
+    # FIX: Explicitly declare as global to prevent Python from treating
+    # dictionary deletion/modification as a local assignment.
+    global view_count_cache 
     while True:
         time.sleep(30)
         try:
@@ -660,9 +662,9 @@ def flush_view_cache():
                     continue
                     
                 bulk_ops = []
-                keys_to_reset = []
+                keys_to_delete = [] 
                 
-                # Use list() to iterate over a copy while modifying the dictionary safely later
+                # Iterate over a copy to safely modify the original dictionary later
                 for cache_key, count in list(view_count_cache.items()): 
                     if count > 0:
                         content_id = cache_key.replace('views_', '')
@@ -672,15 +674,16 @@ def flush_view_cache():
                                 {"$inc": {"views": count}}
                             )
                         )
-                        keys_to_reset.append(cache_key)
+                        keys_to_delete.append(cache_key)
 
                 if bulk_ops and content_collection:
                     content_collection.bulk_write(bulk_ops)
                     
-                    # Reset the counters and remove keys where count is zero
-                    for key in keys_to_reset:
+                    # Remove the flushed keys from the global cache
+                    for key in keys_to_delete:
                         if key in view_count_cache:
-                            del view_count_cache[key] # Remove the key entirely after flushing
+                            # This is the line that required 'global'
+                            del view_count_cache[key] 
                 
         except Exception as e:
             logger.error(f"Error flushing view cache: {e}")
