@@ -3,15 +3,9 @@ import json
 import requests
 from flask import Flask, request, jsonify
 from pymongo import MongoClient
-from bson.objectid import ObjectId
 from datetime import datetime
 
 # --- 1. MONGODB SETUP ---
-# Reading environment variables provided by the user:
-# BOT_TOKEN=8454570063:AAEC18lz-I4WzJEzE-E01fNf5k0SlcaJRZI
-# MONGODB_URI=mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie
-# APP_URL=https://confident-jemima-school1660440-5a325843.koyeb.app
-
 client = None
 db = None
 content_collection = None
@@ -19,7 +13,6 @@ content_collection = None
 try:
     MONGODB_URI = os.environ.get("MONGODB_URI")
     if not MONGODB_URI:
-        # NOTE: This error is expected if the variable is not set in the environment
         print("FATAL: MONGODB_URI environment variable is not set.")
     else:
         # Initialize MongoDB Client
@@ -41,7 +34,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 APP_URL = os.environ.get("APP_URL")
 
 if not BOT_TOKEN:
-    # This explicit raise is what caused the worker to crash, ensuring secrets are set
     raise ValueError("BOT_TOKEN environment variable is not set.")
 if not APP_URL:
     print("WARNING: APP_URL environment variable is not set. Frontend fetching may fail.")
