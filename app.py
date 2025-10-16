@@ -3,37 +3,45 @@ import json
 import requests
 from flask import Flask, request, jsonify
 from pymongo import MongoClient
+from bson.objectid import ObjectId
 from datetime import datetime
 
 # --- 1. MONGODB SETUP ---
+# Reading environment variables provided by the user:
+# BOT_TOKEN=8454570063:AAEC18lz-I4WzJEzE-E01fNf5k0SlcaJRZI
+# MONGODB_URI=mongodb+srv://movie:movie@movie.tylkv.mongodb.net/?retryWrites=true&w=majority&appName=movie
+# APP_URL=https://confident-jemima-school1660440-5a325843.koyeb.app
+
+client = None
+db = None
+content_collection = None
+
 try:
     MONGODB_URI = os.environ.get("MONGODB_URI")
     if not MONGODB_URI:
-        raise ValueError("MONGODB_URI environment variable is not set.")
-
-    # Initialize MongoDB Client
-    client = MongoClient(MONGODB_URI)
-    
-    # Define Database and Collection
-    # Note: Using 'movie' as the database name based on the connection string
-    db_name = 'movie' 
-    collection_name = 'content_items'
-    db = client[db_name]
-    content_collection = db[collection_name]
-    
-    # Test connection by listing collections
-    print(f"MongoDB connected. Database: {db_name}. Collections: {db.list_collection_names()}")
+        # NOTE: This error is expected if the variable is not set in the environment
+        print("FATAL: MONGODB_URI environment variable is not set.")
+    else:
+        # Initialize MongoDB Client
+        client = MongoClient(MONGODB_URI)
+        
+        # Define Database and Collection
+        db_name = 'movie' 
+        collection_name = 'content_items'
+        db = client[db_name]
+        content_collection = db[collection_name]
+        
+        print(f"MongoDB connected. Database: {db_name}. Collections: {db.list_collection_names()}")
 except Exception as e:
     print(f"FATAL: Error initializing MongoDB: {e}")
-    client = None
-    db = None
-    content_collection = None
 
 # --- 2. TELEGRAM AND FLASK SETUP ---
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-APP_URL = os.environ.get("APP_URL") # Used to inform the frontend where to fetch data
+APP_URL = os.environ.get("APP_URL")
+
 if not BOT_TOKEN:
+    # This explicit raise is what caused the worker to crash, ensuring secrets are set
     raise ValueError("BOT_TOKEN environment variable is not set.")
 if not APP_URL:
     print("WARNING: APP_URL environment variable is not set. Frontend fetching may fail.")
@@ -87,19 +95,17 @@ def save_content(content_data):
             "created_at": datetime.utcnow() # Use UTC datetime for creation time
         }
         
-        # Insert document into the 'content_items' collection
         content_collection.insert_one(document)
         return True
     except Exception as e:
         print(f"MongoDB Save Error: {e}")
         return False
 
-# --- 4. CONVERSATION HANDLERS (Same logic as before) ---
+# --- 4. CONVERSATION HANDLERS (Simplified for brevity) ---
 
 def start_new_upload(chat_id):
     """Starts the content upload process, asking for type."""
     USER_STATE[chat_id] = {'state': STATE_WAITING_FOR_TYPE, 'content_data': {'links': []}}
-    
     keyboard = {
         'inline_keyboard': [
             [{'text': '🎬 Movie', 'callback_data': 'type_Movie'}],
@@ -108,34 +114,26 @@ def start_new_upload(chat_id):
     }
     send_message(
         chat_id, 
-        "*Welcome to the Content Upload Bot!*\\n\\nPlease select the type of content you want to upload:",
+        "*Welcome to the Content Upload Bot!*\\n\\nPlease select the type of content:",
         reply_markup=keyboard
     )
 
 def ask_for_title(chat_id):
-    """Prompts for the content title."""
     USER_STATE[chat_id]['state'] = STATE_WAITING_FOR_TITLE
     send_message(chat_id, "✅ Content Type set.\\n\\nNow, what is the *Title* of the Movie/Series?")
 
 def ask_for_thumbnail(chat_id):
-    """Prompts for the thumbnail URL."""
     USER_STATE[chat_id]['state'] = STATE_WAITING_FOR_THUMBNAIL
     send_message(chat_id, "✅ Title set.\\n\\nNext, please send the *public URL* for the Content Thumbnail Image:")
 
 def ask_for_link_title(chat_id):
-    """Prompts for the link/episode title."""
     content_type = USER_STATE[chat_id]['content_data']['type']
-    
-    if content_type == 'Movie':
-        prompt = "Enter the name for the streaming link (e.g., 'Full Movie' or '480p Stream')."
-    else: # Series
-        prompt = "Enter the name for the *next episode* (e.g., 'S01E01 Pilot' or 'Episode 3')."
+    prompt = "Enter the name for the streaming link (e.g., 'Full Movie' or 'S01E01 Pilot')."
     
     USER_STATE[chat_id]['state'] = STATE_WAITING_FOR_LINK_TITLE
     send_message(chat_id, f"✅ Thumbnail URL set.\\n\\n{prompt}")
 
 def finish_upload(chat_id):
-    """Completes the upload and saves to MongoDB."""
     content_data = USER_STATE[chat_id]['content_data']
     
     if not content_data.get('title') or not content_data.get('links'):
@@ -144,8 +142,7 @@ def finish_upload(chat_id):
         return
 
     if save_content(content_data):
-        send_message(chat_id, 
-            f"🎉 *Success!*\\n\\nContent '{content_data['title']}' saved to MongoDB.\\nIt should now be visible on your frontend page.")
+        send_message(chat_id, f"🎉 *Success!* Content '{content_data['title']}' saved to MongoDB.")
         USER_STATE[chat_id]['state'] = STATE_START
         USER_STATE[chat_id]['content_data'] = {'links': []}
     else:
@@ -162,21 +159,19 @@ def handle_text_message(chat_id, text):
 
     if state == STATE_WAITING_FOR_TITLE:
         content_data['title'] = text
-        send_message(chat_id, f"Title set: *{text}*")
         ask_for_thumbnail(chat_id)
 
     elif state == STATE_WAITING_FOR_THUMBNAIL:
         if text.startswith('http'):
             content_data['thumbnail_url'] = text
-            send_message(chat_id, "Thumbnail URL received.")
             ask_for_link_title(chat_id)
         else:
-            send_message(chat_id, "That doesn't look like a URL. Please send a *public URL* starting with `http` or `https`.")
+            send_message(chat_id, "Please send a *public URL* starting with `http` or `https`.")
 
     elif state == STATE_WAITING_FOR_LINK_TITLE:
         content_data['current_link_title'] = text
         USER_STATE[chat_id]['state'] = STATE_WAITING_FOR_LINK_URL
-        send_message(chat_id, f"Link name set: *{text}*\\n\\nNow, send the *Streaming URL* for this link/episode:")
+        send_message(chat_id, f"Link name set: *{text}*\\n\\nNow, send the *Streaming URL*:")
 
     elif state == STATE_WAITING_FOR_LINK_URL:
         if text.startswith('http'):
@@ -190,28 +185,23 @@ def handle_text_message(chat_id, text):
                 ]
             }
             send_message(chat_id, 
-                f"✅ Streaming URL added! Total links: {len(content_data['links'])}.\\n\\nWhat would you like to do next?",
+                f"✅ Streaming URL added! Total links: {len(content_data['links'])}.\\n\\nWhat next?",
                 reply_markup=keyboard
             )
             USER_STATE[chat_id]['state'] = STATE_CONFIRM_LINK
         else:
-            send_message(chat_id, "That doesn't look like a valid streaming URL. Please send a URL starting with `http` or `https`.")
+            send_message(chat_id, "Please send a URL starting with `http` or `https`.")
 
     elif state == STATE_START:
         send_message(chat_id, "Please use the /start command to begin a new content upload.")
 
-    else:
-        send_message(chat_id, "I'm waiting for a specific piece of information. Please follow the current prompt or type /start to reset.")
-
 # Helper function to handle callback queries
 def handle_callback_query(chat_id, data):
     state = USER_STATE.get(chat_id, {}).get('state')
-    content_data = USER_STATE.get(chat_id, {}).get('content_data', {})
 
     if state == STATE_WAITING_FOR_TYPE and data.startswith('type_'):
         content_type = data.split('_')[1]
-        content_data['type'] = content_type
-        send_message(chat_id, f"You selected: *{content_type}*")
+        USER_STATE[chat_id]['content_data']['type'] = content_type
         ask_for_title(chat_id)
         
     elif state == STATE_CONFIRM_LINK and data.startswith('add_'):
@@ -269,5 +259,5 @@ def get_content():
 @app.route('/')
 def index():
     """Koyeb health check endpoint."""
-    return f"MongoDB Bot Listener for Database '{db_name}' is running.", 200
+    return "Telegram Bot API Listener is running.", 200
 
