@@ -1,5 +1,8 @@
-flask
-flask-cors
-requests
-pymongo
-python-dotenv
+flask==2.3.3
+flask-cors==4.0.0
+requests==2.31.0
+pymongo==4.5.0
+python-dotenv==1.0.0
+pyotp==2.8.0
+qrcode==7.4.2
+Pillow==10.0.0
