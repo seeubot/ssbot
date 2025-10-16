@@ -536,7 +536,7 @@ def webhook():
             if text.upper() == 'DONE':
                 if not user_state['data']['links']:
                     send_message(chat_id, "❌ Cannot save content without any links. Please add at least one link or type **/cancel**.")
-                    return
+                    return jsonify({"status": "ok"}), 200
 
                 # --- FINAL SAVE ACTION ---
                 content_id = save_content(user_state['data'])
@@ -646,13 +646,11 @@ def webhook():
         return jsonify({"status": "error"}), 500
 
 # -------------------------------------------------------------
-# --- BACKGROUND TASKS (FIXED: Added global keyword) ---
+# --- BACKGROUND TASKS (FIXED: Proper None comparison) ---
 # -------------------------------------------------------------
 
 def flush_view_cache():
     """Periodically flush view count cache to database."""
-    # FIX: Explicitly declare as global to prevent Python from treating
-    # dictionary deletion/modification as a local assignment.
     global view_count_cache 
     while True:
         time.sleep(30)
@@ -664,7 +662,6 @@ def flush_view_cache():
                 bulk_ops = []
                 keys_to_delete = [] 
                 
-                # Iterate over a copy to safely modify the original dictionary later
                 for cache_key, count in list(view_count_cache.items()): 
                     if count > 0:
                         content_id = cache_key.replace('views_', '')
@@ -676,13 +673,12 @@ def flush_view_cache():
                         )
                         keys_to_delete.append(cache_key)
 
-                if bulk_ops and content_collection:
+                # FIXED: Proper None comparison for PyMongo Collection
+                if bulk_ops and content_collection is not None:
                     content_collection.bulk_write(bulk_ops)
                     
-                    # Remove the flushed keys from the global cache
                     for key in keys_to_delete:
                         if key in view_count_cache:
-                            # This is the line that required 'global'
                             del view_count_cache[key] 
                 
         except Exception as e:
@@ -702,7 +698,6 @@ def set_webhook():
     url = TELEGRAM_API + "setWebhook"
     
     try:
-        # Increased timeout for webhook setting as it previously timed out
         response = requests.post(url, json={'url': webhook_url}, timeout=15) 
         response.raise_for_status()
         result = response.json()
