@@ -35,7 +35,6 @@ def init_mongodb():
             logger.error("MONGODB_URI environment variable is not set.")
             return False
         
-        # NOTE: maxPoolSize and minPoolSize set for high concurrency
         client = MongoClient(
             MONGODB_URI,
             serverSelectionTimeoutMS=5000, 
@@ -54,7 +53,6 @@ def init_mongodb():
         db = client[db_name]
         content_collection = db[collection_name]
         
-        # Ensure indexes exist for performance
         content_collection.create_index([("created_at", -1)])
         content_collection.create_index([("tags", 1)])
         content_collection.create_index([("views", -1)])
@@ -63,10 +61,6 @@ def init_mongodb():
         return True
     except Exception as e:
         logger.error(f"MongoDB initialization failed: {e}")
-        # Ensure collection is None if connection failed
-        content_collection = None
-        client = None
-        db = None
         return False
 
 # --- 2. SIMPLE AUTHENTICATION ---
@@ -85,7 +79,6 @@ def require_auth(f):
     return decorated_function
 
 # --- 3. SIMPLE CACHING SYSTEM ---
-# TTLCache ensures cache items expire after 30 seconds
 content_cache = TTLCache(maxsize=100, ttl=30)  
 
 def get_cache_key():
@@ -105,11 +98,9 @@ def cached_response(timeout=30):
                 logger.info(f"Cache hit for {cache_key}")
                 return content_cache[cache_key]
             
-            # Execute the function to get the response
             response = f(*args, **kwargs)
             
-            # Cache only successful 200 responses
-            if isinstance(response, tuple) and response[1] == 200:
+            if response[1] == 200:
                 content_cache[cache_key] = response
             
             return response
@@ -160,7 +151,6 @@ if not BOT_TOKEN:
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/" if BOT_TOKEN else None
 
 app = Flask(__name__)
-# Enable CORS for all routes
 CORS(app)
 
 # Global state to track multi-step conversation
@@ -230,7 +220,6 @@ def send_message(chat_id, text, reply_markup=None):
     if reply_markup is not None:
         payload['reply_markup'] = json.dumps(reply_markup)
     else:
-        # Default to main keyboard if in main step
         if USER_STATE.get(chat_id, {}).get('step') == 'main':
              payload['reply_markup'] = json.dumps(START_KEYBOARD)
 
@@ -283,7 +272,7 @@ def index():
 def health():
     """Fast health check endpoint."""
     try:
-        if client is not None: 
+        if content_collection is not None:
             client.admin.command('ping')
             return jsonify({
                 "status": "healthy", 
@@ -295,13 +284,9 @@ def health():
     
     return jsonify({"status": "unhealthy", "database": "disconnected"}), 503
 
-@app.route('/api/track-view', methods=['POST', 'OPTIONS'])
+@app.route('/api/track-view', methods=['POST'])
 def track_view():
     """Fast view count tracking with minimal processing."""
-    if request.method == 'OPTIONS':
-        # Handle CORS preflight request
-        return '', 200
-        
     try:
         data = request.get_json(silent=True) or {}
         content_id = data.get('content_id')
@@ -625,7 +610,6 @@ def webhook():
                     if not isinstance(links, list): raise ValueError
                     update_data['links'] = links
                 except:
-                    # Fallback for simple URL
                     update_data['links'] = [{"url": text, "episode_title": "Watch Link"}]
             else:
                 update_data[field] = text
@@ -662,22 +646,19 @@ def webhook():
         return jsonify({"status": "error"}), 500
 
 # -------------------------------------------------------------
-# --- BACKGROUND TASKS (Fixed: Global and None Check) ---
+# --- BACKGROUND TASKS (FIXED: Added global keyword) ---
 # -------------------------------------------------------------
 
 def flush_view_cache():
     """Periodically flush view count cache to database."""
+    # FIX: Explicitly declare as global to prevent Python from treating
+    # dictionary deletion/modification as a local assignment.
     global view_count_cache 
     while True:
         time.sleep(30)
         try:
             with cache_lock:
                 if not view_count_cache:
-                    continue
-                
-                # Explicitly check against None for Collection object
-                if content_collection is None:
-                    logger.warning("Skipping view cache flush: MongoDB collection is not available.")
                     continue
                     
                 bulk_ops = []
@@ -695,12 +676,13 @@ def flush_view_cache():
                         )
                         keys_to_delete.append(cache_key)
 
-                if bulk_ops: 
+                if bulk_ops and content_collection:
                     content_collection.bulk_write(bulk_ops)
                     
                     # Remove the flushed keys from the global cache
                     for key in keys_to_delete:
                         if key in view_count_cache:
+                            # This is the line that required 'global'
                             del view_count_cache[key] 
                 
         except Exception as e:
@@ -713,4 +695,48 @@ def flush_view_cache():
 def set_webhook():
     """Set the webhook URL for Telegram."""
     if not APP_URL or not BOT_TOKEN:
-        logger.
+        logger.warning("APP_URL or BOT_TOKEN not set. Skipping webhook setup.")
+        return False
+    
+    webhook_url = f"{APP_URL.rstrip('/')}/{BOT_TOKEN}"
+    url = TELEGRAM_API + "setWebhook"
+    
+    try:
+        # Increased timeout for webhook setting as it previously timed out
+        response = requests.post(url, json={'url': webhook_url}, timeout=15) 
+        response.raise_for_status()
+        result = response.json()
+        
+        if result.get('ok'):
+            logger.info(f"Webhook set successfully: {webhook_url}")
+            return True
+        else:
+            logger.error(f"Failed to set webhook: {result}")
+            return False
+    except Exception as e:
+        logger.error(f"Error setting webhook: {e}")
+        return False
+
+@app.before_request
+def before_request():
+    """Initialize connections before handling requests."""
+    global content_collection
+    if content_collection is None:
+        init_mongodb()
+
+if __name__ == '__main__':
+    logger.info("Starting Optimized StreamHub Application...")
+    
+    init_mongodb()
+    
+    # Start background tasks
+    cache_thread = threading.Thread(target=flush_view_cache, daemon=True)
+    cache_thread.start()
+    
+    if APP_URL and BOT_TOKEN:
+        set_webhook()
+    else:
+        logger.warning("APP_URL or BOT_TOKEN not set - webhook not configured")
+    
+    logger.info(f"Starting optimized Flask app on port {PORT}")
+    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
