@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StreamHub - Your Streaming Platform</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #333;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+            color: white;
+        }
+
+        h1 {
+            font-size: 3rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
+
+        .content-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 25px;
+            margin-bottom: 40px;
+        }
+
+        .content-card {
+            background: white;
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .content-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 35px rgba(0,0,0,0.25);
+        }
+
+        .thumbnail {
+            width: 100%;
+            height: 200px;
+            object-fit: cover;
+            border-bottom: 3px solid #2a5298;
+        }
+
+        .card-content {
+            padding: 20px;
+        }
+
+        .card-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #2a5298;
+            line-height: 1.3;
+        }
+
+        .card-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 10px;
+        }
+
+        .card-type {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .movie {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .webseries {
+            background: #FF9800;
+            color: white;
+        }
+
+        .episode-count {
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.9);
+            z-index: 1000;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .modal-content {
+            background: white;
+            margin: 0 auto;
+            padding: 30px;
+            border-radius: 15px;
+            max-width: 900px;
+            position: relative;
+            animation: modalSlideIn 0.3s ease;
+        }
+
+        @keyframes modalSlideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-50px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .close-btn {
+            position: absolute;
+            top: 15px;
+            right: 20px;
+            font-size: 2rem;
+            cursor: pointer;
+            color: #333;
+            background: none;
+            border: none;
+            z-index: 1001;
+        }
+
+        .close-btn:hover {
+            color: #ff4444;
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: flex-start;
+            gap: 25px;
+            margin-bottom: 25px;
+        }
+
+        .modal-thumbnail {
+            width: 200px;
+            height: 280px;
+            object-fit: cover;
+            border-radius: 10px;
+            flex-shrink: 0;
+        }
+
+        .modal-info {
+            flex: 1;
+        }
+
+        .modal-title {
+            font-size: 2rem;
+            color: #2a5298;
+            margin-bottom: 10px;
+        }
+
+        .streaming-section {
+            margin: 25px 0;
+        }
+
+        .section-title {
+            font-size: 1.4rem;
+            color: #2a5298;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #2a5298;
+            padding-bottom: 5px;
+        }
+
+        .stream-btn {
+            display: inline-block;
+            padding: 12px 25px;
+            background: linear-gradient(135deg, #4CAF50, #45a049);
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            margin: 5px 10px 5px 0;
+            transition: all 0.3s ease;
+            font-weight: 500;
+            border: none;
+            cursor: pointer;
+        }
+
+        .stream-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        .episode-list {
+            display: grid;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .episode-item {
+            padding: 15px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            justify-content: between;
+            align-items: center;
+        }
+
+        .episode-item:hover {
+            background: #f8f9fa;
+            border-color: #2a5298;
+            transform: translateX(5px);
+        }
+
+        .episode-info {
+            flex: 1;
+        }
+
+        .episode-number {
+            font-weight: 600;
+            color: #2a5298;
+            margin-right: 10px;
+        }
+
+        .episode-title {
+            font-weight: 500;
+        }
+
+        .play-btn {
+            background: #2a5298;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.3s ease;
+        }
+
+        .play-btn:hover {
+            background: #1e3c72;
+        }
+
+        .loading {
+            text-align: center;
+            color: white;
+            font-size: 1.2rem;
+            padding: 50px;
+        }
+
+        @media (max-width: 768px) {
+            .content-grid {
+                grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+                gap: 20px;
+            }
+            
+            h1 {
+                font-size: 2.2rem;
+            }
+            
+            .modal-header {
+                flex-direction: column;
+                text-align: center;
+            }
+            
+            .modal-thumbnail {
+                width: 100%;
+                max-width: 300px;
+                height: 200px;
+                margin: 0 auto;
+            }
+            
+            .modal-title {
+                font-size: 1.6rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .content-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .container {
+                padding: 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎬 StreamHub</h1>
+            <p class="subtitle">Your Ultimate Streaming Destination</p>
+        </header>
+
+        <div class="content-grid" id="contentGrid">
+            <div class="loading">Loading content...</div>
+        </div>
+    </div>
+
+    <!-- Modal for content details -->
+    <div class="modal" id="contentModal">
+        <div class="modal-content">
+            <button class="close-btn" onclick="closeModal()">&times;</button>
+            <div id="modalContent">
+                <!-- Modal content will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let allContent = [];
+
+        // Fetch content from backend
+        async function fetchContent() {
+            try {
+                const response = await fetch('/api/content');
+                allContent = await response.json();
+                renderContent();
+            } catch (error) {
+                console.error('Error fetching content:', error);
+                document.getElementById('contentGrid').innerHTML = 
+                    '<div class="loading">Error loading content. Please try again later.</div>';
+            }
+        }
+
+        // Render content
+        function renderContent() {
+            const grid = document.getElementById('contentGrid');
+            
+            if (allContent.length === 0) {
+                grid.innerHTML = '<div class="loading">No content available yet.</div>';
+                return;
+            }
+
+            grid.innerHTML = allContent.map(item => `
+                <div class="content-card" onclick="openContent('${item._id}')">
+                    <img src="${item.thumbnail}" alt="${item.title}" class="thumbnail" 
+                         onerror="this.src='https://via.placeholder.com/300x200/2a5298/ffffff?text=No+Thumbnail'">
+                    <div class="card-content">
+                        <div class="card-title">${item.title}</div>
+                        <div class="card-meta">
+                            <span class="card-type ${item.type}">
+                                ${item.type === 'movie' ? '🎬 Movie' : '📺 Web Series'}
+                            </span>
+                            ${item.type === 'webseries' ? 
+                                `<span class="episode-count">${item.episodes.length} episodes</span>` : 
+                                '<span class="episode-count">Movie</span>'
+                            }
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Open content modal
+        async function openContent(id) {
+            const content = allContent.find(item => item._id === id);
+            const modalContent = document.getElementById('modalContent');
+            const modal = document.getElementById('contentModal');
+
+            if (content.type === 'movie') {
+                modalContent.innerHTML = `
+                    <div class="modal-header">
+                        <img src="${content.thumbnail}" alt="${content.title}" class="modal-thumbnail"
+                             onerror="this.src='https://via.placeholder.com/300x400/2a5298/ffffff?text=No+Thumbnail'">
+                        <div class="modal-info">
+                            <h1 class="modal-title">${content.title}</h1>
+                            <div class="card-type movie" style="display: inline-block;">🎬 Movie</div>
+                        </div>
+                    </div>
+                    
+                    <div class="streaming-section">
+                        <h2 class="section-title">🎯 Streaming Links</h2>
+                        <div>
+                            ${content.streamingLinks.map((link, index) => 
+                                `<a href="${link}" target="_blank" class="stream-btn">Watch Link ${index + 1}</a>`
+                            ).join('')}
+                        </div>
+                    </div>
+                `;
+            } else {
+                modalContent.innerHTML = `
+                    <div class="modal-header">
+                        <img src="${content.thumbnail}" alt="${content.title}" class="modal-thumbnail"
+                             onerror="this.src='https://via.placeholder.com/300x400/2a5298/ffffff?text=No+Thumbnail'">
+                        <div class="modal-info">
+                            <h1 class="modal-title">${content.title}</h1>
+                            <div class="card-type webseries" style="display: inline-block;">📺 Web Series</div>
+                            <p style="margin-top: 10px; color: #666;">${content.episodes.length} Episodes</p>
+                        </div>
+                    </div>
+                    
+                    <div class="streaming-section">
+                        <h2 class="section-title">📺 Episodes</h2>
+                        <div class="episode-list">
+                            ${content.episodes.map(episode => `
+                                <div class="episode-item" onclick="playEpisode('${episode.streamingLink}')">
+                                    <div class="episode-info">
+                                        <span class="episode-number">Episode ${episode.episodeNumber}</span>
+                                        <span class="episode-title">${episode.title}</span>
+                                    </div>
+                                    <button class="play-btn">Play</button>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            modal.style.display = 'block';
+            document.body.style.overflow = 'hidden';
+        }
+
+        // Play episode
+        function playEpisode(link) {
+            window.open(link, '_blank');
+        }
+
+        // Close modal
+        function closeModal() {
+            document.getElementById('contentModal').style.display = 'none';
+            document.body.style.overflow = 'auto';
+        }
+
+        // Close modal when clicking outside or pressing ESC
+        window.onclick = function(event) {
+            const modal = document.getElementById('contentModal');
+            if (event.target === modal) {
+                closeModal();
+            }
+        }
+
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closeModal();
+            }
+        });
+
+        // Initialize
+        fetchContent();
+    </script>
+</body>
+</html>
