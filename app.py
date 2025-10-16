@@ -675,7 +675,7 @@ def flush_view_cache():
                 if not view_count_cache:
                     continue
                 
-                # FIX 2: Explicitly check against None for Collection object
+                # Explicitly check against None for Collection object
                 if content_collection is None:
                     logger.warning("Skipping view cache flush: MongoDB collection is not available.")
                     continue
@@ -695,14 +695,12 @@ def flush_view_cache():
                         )
                         keys_to_delete.append(cache_key)
 
-                # FIX 2: Using the explicit None check
                 if bulk_ops: 
                     content_collection.bulk_write(bulk_ops)
                     
                     # Remove the flushed keys from the global cache
                     for key in keys_to_delete:
                         if key in view_count_cache:
-                            # FIX 1: 'global' keyword handles the del operation scope issue
                             del view_count_cache[key] 
                 
         except Exception as e:
@@ -715,11 +713,4 @@ def flush_view_cache():
 def set_webhook():
     """Set the webhook URL for Telegram."""
     if not APP_URL or not BOT_TOKEN:
-        logger.warning("APP_URL or BOT_TOKEN not set. Skipping webhook setup.")
-        return False
-    
-    webhook_url = f"{APP_URL.rstrip('/')}/{BOT_TOKEN}"
-    url = TELEGRAM_API + "setWebhook"
-    
-    try:
-        response = requests.post(url, json={'
+        logger.
