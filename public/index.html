@@ -38,24 +38,13 @@
             to { transform: rotate(360deg); }
         }
 
-        /* Responsive height for placeholder image */
-        .card-image-placeholder {
-            width: 100%;
-            height: 400px; 
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: #21262d; 
-            color: #8b949e;
-            font-size: 1.5rem;
-            text-align: center;
-        }
-
         .modal-bg {
-            background-color: rgba(0, 0, 0, 0.9);
+            /* Very dark semi-transparent overlay */
+            background-color: rgba(0, 0, 0, 0.95); 
         }
 
         .modal-content-custom {
+            /* Dark grey background for the modal content */
             background-color: #1f2937;
         }
     </style>
@@ -66,7 +55,7 @@
         <!-- Header -->
         <header class="text-center mb-10 pt-4 sm:pt-8 animate-in fade-in zoom-in duration-500">
             <h1 class="text-5xl sm:text-7xl font-extrabold mb-2 gradient-text">
-                Advance Request
+                StreamHub
             </h1>
             <p class="text-xl sm:text-2xl text-gray-400 font-light">
                 Watch Free Online
@@ -79,7 +68,7 @@
                 <input 
                     type="text" 
                     id="search-input" 
-                    placeholder="Search for a movie or series..." 
+                    placeholder="Search for a video or series..." 
                     oninput="handleSearch()"
                     class="w-full py-4 pl-12 pr-6 text-lg text-white card-bg rounded-xl shadow-2xl focus:ring-4 focus:ring-indigo-500 focus:border-indigo-500 border-2 border-transparent transition duration-300"
                 >
@@ -106,15 +95,51 @@
         </div>
     </div>
 
-    <!-- Watch Links Modal -->
-    <div id="modal" class="fixed inset-0 modal-bg z-50 flex items-center justify-center p-4 hidden transition duration-300 ease-out">
+    <!-- 1. Links Selection Modal -->
+    <div id="links-modal" class="fixed inset-0 modal-bg z-50 flex items-center justify-center p-4 hidden transition duration-300 ease-out">
         <div class="modal-content-custom rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 relative shadow-2xl transition-all duration-300">
-            <button class="close-btn absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white w-8 h-8 rounded-full text-xl leading-none transition-transform duration-300 transform hover:rotate-90" onclick="closeModal()">&times;</button>
-            <h2 class="text-3xl font-bold text-white mb-6 pr-8" id="modal-title"></h2>
+            <button class="close-btn absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white w-8 h-8 rounded-full text-xl leading-none transition-transform duration-300 transform hover:rotate-90" onclick="closeLinksModal()">&times;</button>
+            <h2 class="text-3xl font-bold text-white mb-6 pr-8" id="links-modal-title"></h2>
+            <p class="text-gray-400 mb-6">Select a streaming source to begin watching:</p>
             
             <ul class="space-y-4" id="links-list">
                 <!-- Links will be injected here -->
             </ul>
+        </div>
+    </div>
+
+    <!-- 2. Video Player Modal (Includes Iframe, Telegram Logo, and Similar Content) -->
+    <div id="player-modal" class="fixed inset-0 modal-bg z-50 flex items-center justify-center p-4 hidden transition duration-300 ease-out">
+        <div class="modal-content-custom rounded-2xl max-w-5xl w-full max-h-[95vh] overflow-y-auto p-6 relative shadow-2xl transition-all duration-300">
+            <button class="close-btn absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white w-8 h-8 rounded-full text-xl leading-none transition-transform duration-300 transform hover:rotate-90" onclick="closePlayerModal()">&times;</button>
+            <h2 class="text-3xl font-bold text-white mb-6 pr-8" id="player-modal-title"></h2>
+
+            <!-- Video Player Container (16:9 Aspect Ratio) -->
+            <div class="relative w-full pb-[56.25%] mb-8 rounded-lg overflow-hidden shadow-2xl">
+                <iframe id="video-player-iframe" 
+                        class="absolute top-0 left-0 w-full h-full" 
+                        src="" 
+                        scrolling="no" 
+                        frameborder="0" 
+                        allowfullscreen="true" 
+                        webkitallowfullscreen="true" 
+                        mozallowfullscreen="true">
+                </iframe>
+
+                <!-- Telegram Button (Logo) over Player -->
+                <a href="https://t.me/+oOdTY-zbwCY3MzA1" target="_blank" class="absolute top-4 left-4 bg-blue-500 hover:bg-blue-600 text-white p-2 rounded-full shadow-lg transition duration-300 transform hover:scale-110 flex items-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M18.3 5.4l-14.7 6.4c-.6.3-.6.7 0 1l3.5 1.1 9.1-5.7c.4-.3.7-.1.4.2l-7.3 6.6-1.9 4.8c-.2.6-.5.7-.9.4l-3.3-2.1c-.5-.3-.4-.5 0-.7l16.1-9.5c.6-.3.6-.6 0-.9z"/></svg>
+                </a>
+            </div>
+
+            <!-- Similar Content Section (Tags Key) -->
+            <div id="similar-content-section">
+                <h3 class="text-xl font-bold text-gray-300 mb-4">Similar Content (Tags Key)</h3>
+                <div id="tags-container" class="flex flex-wrap gap-2">
+                    <!-- Tags will be injected here as clickable search links -->
+                </div>
+            </div>
+
         </div>
     </div>
 
@@ -130,36 +155,28 @@
         
         const TELEGRAM_URL = "https://t.me/+oOdTY-zbwCY3MzA1";
         
-        /**
-         * Redirects the user to the Telegram channel.
-         */
         function redirectTelegram() {
+            // console.warn("Attempted inspection. Redirecting to Telegram.");
             window.location.href = TELEGRAM_URL;
         }
 
         // 1. Disable Right-Click (Context Menu)
         document.addEventListener('contextmenu', function(e) {
             e.preventDefault();
-            console.log("Right-click blocked. Redirecting...");
             redirectTelegram();
         });
 
         // 2. Disable Keyboard Shortcuts (F12, Ctrl/Cmd + Shift + I/J/C/U)
         document.addEventListener('keydown', function(e) {
-            // F12 key check
             if (e.key === 'F12') {
                 e.preventDefault();
-                console.log("F12 blocked. Redirecting...");
                 redirectTelegram();
             }
 
-            // Ctrl/Cmd Key combinations
-            if (e.ctrlKey || e.metaKey) { // metaKey is for Cmd on Mac
+            if (e.ctrlKey || e.metaKey) { 
                 const key = e.key.toLowerCase();
-                // Ctrl+Shift+I (Developer Tools), Ctrl+Shift+J (Console), Ctrl+Shift+C (Element Selector), Ctrl+U (View Source)
                 if ((e.shiftKey && (key === 'i' || key === 'j' || key === 'c')) || key === 'u') {
                     e.preventDefault();
-                    console.log("Keyboard shortcut blocked. Redirecting...");
                     redirectTelegram();
                 }
             }
@@ -168,7 +185,6 @@
         // --- APPLICATION LOGIC ---
 
         let allContent = [];
-        // API endpoint - will be automatically set to your Koyeb URL
         const API_URL = window.location.origin + '/api/content';
 
         /**
@@ -183,13 +199,12 @@
                     allContent = result.data;
                     displayContent();
                 } else {
-                    showEmptyState("No content available yet. Use the Telegram bot to add your first movie or series!");
+                    showEmptyState("No content available yet. Use the Telegram bot to add your first video or series!");
                 }
             } catch (error) {
                 console.error('Error fetching content:', error);
                 showEmptyState("Failed to load content. Check your network connection or API.");
             } finally {
-                // Hide loading spinner
                 document.getElementById('loading').classList.add('hidden');
             }
         }
@@ -202,7 +217,6 @@
             const emptyState = document.getElementById('empty-state');
             const searchTerm = document.getElementById('search-input').value.toLowerCase().trim();
             
-            // Filter logic based on title
             const filteredContent = allContent.filter(item => 
                 item.title && item.title.toLowerCase().includes(searchTerm)
             );
@@ -216,16 +230,15 @@
             emptyState.classList.add('hidden');
             
             grid.innerHTML = filteredContent.map(item => {
-                // Determine card color based on type
-                const typeClass = item.type === 'Movie' 
+                const typeClass = item.type === 'Video' 
                     ? 'bg-red-600' 
                     : 'bg-green-500';
                 
-                // Placeholder SVG for image error (using a cleaner method)
+                // Fallback placeholder image URL
                 const fallbackImage = 'https://placehold.co/280x400/21262d/8b949e?text=' + encodeURIComponent(item.title || 'No Title');
 
                 return `
-                    <div class="content-card card-bg rounded-xl overflow-hidden shadow-xl hover:shadow-2xl transform hover:-translate-y-2 transition duration-300 cursor-pointer group" onclick="openModal('${item._id}')">
+                    <div class="content-card card-bg rounded-xl overflow-hidden shadow-xl hover:shadow-2xl transform hover:-translate-y-2 transition duration-300 cursor-pointer group" onclick="openLinksModal('${item._id}')">
                         <div class="relative">
                             <img class="w-full h-96 object-cover transition-opacity duration-300 group-hover:opacity-80" 
                                  src="${item.thumbnail_url}" 
@@ -250,25 +263,18 @@
             }).join('');
         }
 
-        /**
-         * Updates the content display when the user types in the search bar.
-         */
         let searchTimeout;
         function handleSearch() {
             clearTimeout(searchTimeout);
             searchTimeout = setTimeout(() => {
                 displayContent();
-            }, 300); // Debounce for performance
+            }, 300); 
         }
 
-        /**
-         * Updates the empty state message.
-         */
         function showEmptyState(message) {
             const grid = document.getElementById('content-grid');
             const emptyState = document.getElementById('empty-state');
             grid.innerHTML = '';
-            // Basic parsing of message for multi-line display
             const parts = message.split('.');
             emptyState.querySelector('p:nth-child(2)').textContent = parts[0] || 'No content found.';
             emptyState.querySelector('p:nth-child(3)').textContent = parts[1] ? parts[1].trim() : '';
@@ -277,47 +283,103 @@
 
 
         /**
-         * Opens the modal with links for the selected content.
+         * Opens the Links Modal for selection.
          */
-        function openModal(contentId) {
+        function openLinksModal(contentId) {
             const content = allContent.find(item => item._id === contentId);
             if (!content) return;
 
-            document.getElementById('modal-title').textContent = content.title;
+            document.getElementById('links-modal-title').textContent = content.title;
             
             const linksList = document.getElementById('links-list');
+            
+            // Store content data in the links modal element temporarily
+            document.getElementById('links-modal').dataset.contentId = contentId;
+            
             linksList.innerHTML = content.links.map(link => `
                 <li class="link-item">
-                    <a href="${link.url}" target="_blank" class="block py-4 px-6 bg-gray-700 text-white font-medium rounded-xl hover:bg-indigo-600 transition duration-300 text-center shadow-md">
+                    <button onclick="openPlayerModal('${link.url}', '${content.title}', '${content.tags.join(',')}')" 
+                            class="block w-full py-4 px-6 bg-gray-700 text-white font-medium rounded-xl hover:bg-indigo-600 transition duration-300 text-center shadow-md">
                         ${link.episode_title}
-                    </a>
+                    </button>
                 </li>
             `).join('');
 
-            document.getElementById('modal').classList.remove('hidden');
-            document.getElementById('modal').classList.add('flex');
+            document.getElementById('links-modal').classList.remove('hidden');
+            document.getElementById('links-modal').classList.add('flex');
         }
 
         /**
-         * Closes the modal.
+         * Closes the Links Modal.
          */
-        function closeModal() {
-            document.getElementById('modal').classList.add('hidden');
-            document.getElementById('modal').classList.remove('flex');
+        function closeLinksModal() {
+            document.getElementById('links-modal').classList.add('hidden');
+            document.getElementById('links-modal').classList.remove('flex');
+        }
+        
+        /**
+         * Opens the Video Player Modal.
+         */
+        function openPlayerModal(streamUrl, contentTitle, tagsString) {
+            closeLinksModal(); // Close the selection modal first
+
+            document.getElementById('player-modal-title').textContent = contentTitle;
+            
+            // Set the dynamic streaming URL provided by the bot upload
+            document.getElementById('video-player-iframe').src = streamUrl;
+            
+            // Handle Similar Content (Tags)
+            const tagsContainer = document.getElementById('tags-container');
+            tagsContainer.innerHTML = ''; // Clear old tags
+
+            // Convert tags string to an array and filter out empty items
+            const tags = tagsString.split(',').filter(t => t.trim() !== '');
+
+            if (tags.length > 0) {
+                tags.forEach(tag => {
+                    const tagClean = tag.trim();
+                    tagsContainer.innerHTML += `
+                        <span class="px-3 py-1 bg-gray-700 text-indigo-400 text-sm font-medium rounded-full cursor-pointer hover:bg-indigo-500 hover:text-white transition duration-200"
+                            onclick="document.getElementById('search-input').value = '${tagClean}'; handleSearch(); closePlayerModal();">
+                            #${tagClean}
+                        </span>
+                    `;
+                });
+            } else {
+                 tagsContainer.innerHTML = '<p class="text-gray-500">No tags provided for this content.</p>';
+            }
+
+            document.getElementById('player-modal').classList.remove('hidden');
+            document.getElementById('player-modal').classList.add('flex');
         }
 
-        // Close modal on outside click
-        document.getElementById('modal').addEventListener('click', (e) => {
-            if (e.target.id === 'modal') {
-                closeModal();
-            }
-        });
+        /**
+         * Closes the Video Player Modal and resets the iframe src.
+         */
+        function closePlayerModal() {
+            document.getElementById('player-modal').classList.add('hidden');
+            document.getElementById('player-modal').classList.remove('flex');
+            // Stop video playback by clearing the source
+            document.getElementById('video-player-iframe').src = '';
+        }
 
-        // Close modal on Escape key
+        // Universal Escape key listener for both modals
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
-                closeModal();
+                if (!document.getElementById('player-modal').classList.contains('hidden')) {
+                    closePlayerModal();
+                } else if (!document.getElementById('links-modal').classList.contains('hidden')) {
+                    closeLinksModal();
+                }
             }
+        });
+        
+        // Close modals on outside click
+        document.getElementById('links-modal').addEventListener('click', (e) => {
+            if (e.target.id === 'links-modal') closeLinksModal();
+        });
+        document.getElementById('player-modal').addEventListener('click', (e) => {
+            if (e.target.id === 'player-modal') closePlayerModal();
         });
 
         // Load content on page load
