@@ -11,7 +11,7 @@ import time
 from functools import wraps
 import threading
 from cachetools import TTLCache
-import pymongo # Import for bulk write operations
+import pymongo.operations # Import for bulk write operations
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -35,11 +35,10 @@ def init_mongodb():
             logger.error("MONGODB_URI environment variable is not set.")
             return False
         
-        # NOTE ON CONNECTION TIMEOUT: If you still see 'timed out' errors,
-        # increase serverSelectionTimeoutMS significantly (e.g., to 10000 or 15000)
         client = MongoClient(
             MONGODB_URI,
-            serverSelectionTimeoutMS=5000,
+            # Increased timeout slightly due to previous log errors
+            serverSelectionTimeoutMS=5000, 
             connectTimeoutMS=5000,
             socketTimeoutMS=10000,
             maxPoolSize=50,
@@ -112,10 +111,11 @@ def cached_response(timeout=30):
     return decorator
 
 # --- 4. OPTIMIZED VIEW COUNT FUNCTIONALITY ---
-view_count_cache = {} # Initialized globally to fix NameError
+view_count_cache = {}
 cache_lock = threading.Lock()
 
 def increment_view_count(content_id):
+    """Increment view count for a content item with thread-safe caching."""
     if content_collection is None:
         return False
     
@@ -128,7 +128,20 @@ def increment_view_count(content_id):
         logger.error(f"Error incrementing view count: {e}")
         return False
 
-# ... (rest of view count functions remain the same) ...
+def get_view_count(content_id):
+    """Get view count for a content item."""
+    if content_collection is None:
+        return 0
+    
+    try:
+        doc = content_collection.find_one(
+            {"_id": ObjectId(content_id)}, 
+            {"views": 1}
+        )
+        return doc.get('views', 0) if doc else 0
+    except Exception as e:
+        logger.error(f"Error getting view count: {e}")
+        return 0
 
 # --- 5. TELEGRAM AND FLASK SETUP ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -160,19 +173,19 @@ START_KEYBOARD = {
 # --- BOT HELPER FUNCTIONS ---
 
 def get_content_info_for_edit(content_id):
+    """Retrieves content details for display/editing."""
     if content_collection is None:
         return None
     try:
-        # Check if the content_id is a valid ObjectId before querying
         if not ObjectId.is_valid(content_id):
             return None
-            
         doc = content_collection.find_one({"_id": ObjectId(content_id)})
         return doc
     except Exception:
         return None
 
 def update_content(content_id, update_data):
+    """Updates an existing content document in MongoDB."""
     if content_collection is None:
         return False
     try:
@@ -195,6 +208,7 @@ def update_content(content_id, update_data):
         return False
 
 def send_message(chat_id, text, reply_markup=None):
+    """Sends a message back to the user with timeout."""
     if not TELEGRAM_API:
         logger.warning("Telegram bot token not configured")
         return
@@ -220,6 +234,7 @@ def send_message(chat_id, text, reply_markup=None):
         logger.error(f"Error sending message to {chat_id}: {e}")
 
 def save_content(content_data):
+    """Saves the complete content document to MongoDB."""
     if content_collection is None: 
         return False
     try:
@@ -227,7 +242,6 @@ def save_content(content_data):
             "title": content_data.get('title'),
             "type": content_data.get('type'),
             "thumbnail_url": content_data.get('thumbnail_url'),
-            # Ensure links is initialized as an empty list if not present
             "tags": [t.strip().lower() for t in content_data.get('tags', '').split(',') if t.strip()],
             "links": content_data.get('links', []),
             "views": 0,
@@ -244,9 +258,216 @@ def save_content(content_data):
         logger.error(f"MongoDB Save Error: {e}")
         return False
 
-# --- 7. FLASK ROUTES ---
-# ... (index, health, track_view, get_content, get_content_by_id, get_similar_content, admin_create_content, admin_update_content, admin_delete_content remain the same) ...
-# --- (The content retrieval and admin API routes are omitted here for brevity but assumed to be in the final code) ---
+# -------------------------------------------------------------
+# --- 6. FLASK ROUTES ---
+# -------------------------------------------------------------
+
+@app.route('/', methods=['GET'])
+def index():
+    """Simple status check."""
+    return jsonify({
+        "service": "StreamHub", 
+        "status": "online",
+        "timestamp": datetime.utcnow().isoformat()
+    }), 200
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Fast health check endpoint."""
+    try:
+        if content_collection is not None:
+            client.admin.command('ping')
+            return jsonify({
+                "status": "healthy", 
+                "database": "connected",
+                "timestamp": datetime.utcnow().isoformat()
+            }), 200
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+    
+    return jsonify({"status": "unhealthy", "database": "disconnected"}), 503
+
+@app.route('/api/track-view', methods=['POST'])
+def track_view():
+    """Fast view count tracking with minimal processing."""
+    try:
+        data = request.get_json(silent=True) or {}
+        content_id = data.get('content_id')
+        
+        if not content_id:
+            return jsonify({"success": False, "error": "Content ID required"}), 400
+        
+        increment_view_count(content_id)
+        
+        return jsonify({
+            "success": True, 
+            "content_id": content_id,
+            "message": "View count updated"
+        }), 200
+            
+    except Exception as e:
+        logger.error(f"View tracking error: {e}")
+        return jsonify({"success": False, "error": "Tracking failed"}), 500
+
+@app.route('/api/content', methods=['GET'])
+@cached_response(timeout=30)
+def get_content():
+    """Fast content retrieval with pagination and caching."""
+    if content_collection is None:
+        return jsonify({"error": "Database not configured."}), 503
+
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+        limit = min(int(request.args.get('limit', 20)), 50)
+        skip = (page - 1) * limit
+        
+        content_type = request.args.get('type')
+        tag_filter = request.args.get('tag')
+        
+        query = {}
+        if content_type:
+            query['type'] = content_type
+        if tag_filter:
+            query['tags'] = tag_filter.lower()
+        
+        projection = {
+            'title': 1, 'type': 1, 'thumbnail_url': 1, 'tags': 1, 
+            'views': 1, 'created_at': 1, 'links': 1
+        }
+        
+        total_count = content_collection.count_documents(query)
+        
+        content_cursor = content_collection.find(
+            query, 
+            projection
+        ).sort("created_at", -1).skip(skip).limit(limit)
+        
+        content_list = []
+        for doc in content_cursor:
+            doc['_id'] = str(doc['_id'])
+            if 'created_at' in doc:
+                doc['created_at'] = doc['created_at'].isoformat()
+            content_list.append(doc)
+        
+        return jsonify({
+            "success": True, "data": content_list,
+            "pagination": {
+                "page": page, "limit": limit, "total": total_count,
+                "pages": (total_count + limit - 1) // limit
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"API Fetch Error: {e}")
+        return jsonify({"success": False, "error": "Failed to retrieve content."}), 500
+
+@app.route('/api/content/<content_id>', methods=['GET'])
+@cached_response(timeout=30)
+def get_content_by_id(content_id):
+    """Fast single content retrieval."""
+    if content_collection is None:
+        return jsonify({"error": "Database not configured."}), 503
+
+    try:
+        doc = content_collection.find_one({"_id": ObjectId(content_id)})
+        if not doc:
+            return jsonify({"success": False, "error": "Content not found"}), 404
+        
+        doc['_id'] = str(doc['_id'])
+        if 'created_at' in doc:
+            doc['created_at'] = doc['created_at'].isoformat()
+        
+        return jsonify({"success": True, "data": doc}), 200
+        
+    except Exception as e:
+        logger.error(f"API Single Fetch Error: {e}")
+        return jsonify({"success": False, "error": "Invalid content ID"}), 400
+
+@app.route('/api/content/similar/<tags>', methods=['GET'])
+@cached_response(timeout=30)
+def get_similar_content(tags):
+    """Fast similar content retrieval."""
+    if content_collection is None:
+        return jsonify({"error": "Database not configured."}), 503
+
+    target_tags = [t.strip().lower() for t in tags.split(',') if t.strip()]
+
+    if not target_tags:
+        return jsonify({"success": True, "data": []}), 200
+
+    try:
+        query = {"tags": {"$in": target_tags}}
+        content_cursor = content_collection.find(query).sort("views", -1).limit(10)
+        
+        content_list = []
+        for doc in content_cursor:
+            doc['_id'] = str(doc['_id'])
+            if 'created_at' in doc:
+                doc['created_at'] = doc['created_at'].isoformat()
+            content_list.append(doc)
+            
+        return jsonify({"success": True, "data": content_list}), 200
+    except Exception as e:
+        logger.error(f"API Similar Fetch Error: {e}")
+        return jsonify({"success": False, "error": "Failed to retrieve similar content."}), 500
+
+# --- ADMIN ROUTES WITH SIMPLE AUTH ---
+
+@app.route('/api/admin/content', methods=['POST'])
+@require_auth
+def admin_create_content():
+    """Admin route to create content."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "No data provided"}), 400
+        
+        content_id = save_content(data)
+        if content_id:
+            return jsonify({"success": True, "message": "Content created successfully", "id": content_id}), 201
+        else:
+            return jsonify({"success": False, "error": "Failed to create content"}), 500
+            
+    except Exception as e:
+        logger.error(f"Admin content creation error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/admin/content/<content_id>', methods=['PUT'])
+@require_auth
+def admin_update_content(content_id):
+    """Admin route to update content."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "No update data provided"}), 400
+        
+        if update_content(content_id, data):
+            return jsonify({"success": True, "message": f"Content {content_id} updated successfully"}), 200
+        else:
+            return jsonify({"success": False, "error": "Content not found or no changes made"}), 404
+            
+    except Exception as e:
+        logger.error(f"Admin content update error: {e}")
+        return jsonify({"success": False, "error": "Invalid content ID or update failed"}), 400
+
+@app.route('/api/admin/content/<content_id>', methods=['DELETE'])
+@require_auth
+def admin_delete_content(content_id):
+    """Admin route to delete content."""
+    if content_collection is None:
+        return jsonify({"success": False, "error": "Database not configured."}), 503
+        
+    try:
+        result = content_collection.delete_one({"_id": ObjectId(content_id)})
+        if result.deleted_count > 0:
+            content_cache.clear()
+            return jsonify({"success": True, "message": "Content deleted successfully"}), 200
+        else:
+            return jsonify({"success": False, "error": "Content not found"}), 404
+            
+    except Exception as e:
+        logger.error(f"Admin content deletion error: {e}")
+        return jsonify({"success": False, "error": "Invalid content ID"}), 400
 
 # --- TELEGRAM WEBHOOK HANDLER (FIXED BOT LOGIC) ---
 
@@ -310,11 +531,10 @@ def webhook():
             
         elif user_state['step'] == 'add_tags':
             user_state['data']['tags'] = text
-            # NEW LINK INPUT FLOW STARTS HERE
             user_state['step'] = 'add_episode_title'
             send_message(chat_id, "✅ Tags saved. Now, send the **Episode Title** (e.g., 'Episode 1' or 'Main Link'). Type **DONE** to finish.")
             
-        # --- NEW Sequential Link Input ---
+        # --- Sequential Link Input ---
         elif user_state['step'] == 'add_episode_title':
             if text.upper() == 'DONE':
                 if not user_state['data']['links']:
@@ -330,35 +550,29 @@ def webhook():
                 
                 USER_STATE[chat_id] = {'step': 'main'}
             else:
-                # Save the title and prompt for the URL
                 user_state['data']['current_episode_title'] = text
                 user_state['step'] = 'add_episode_url'
                 send_message(chat_id, f"✅ Episode Title saved. Now send the **URL** for '{text}'.")
 
         elif user_state['step'] == 'add_episode_url':
-            # Save the URL and add the complete link object to the list
             episode_title = user_state['data'].pop('current_episode_title', 'Link')
             user_state['data']['links'].append({
                 "url": text,
                 "episode_title": episode_title
             })
             
-            # Go back to asking for the next episode title
             user_state['step'] = 'add_episode_title'
             send_message(chat_id, f"✅ Link saved. Current links: {len(user_state['data']['links'])}. Send the **NEXT Episode Title** or type **DONE**.")
             
         # --- EDIT FLOW FIX ---
         
-        # FIX: The check below ensures we proceed only after successfully receiving a valid ID
         elif user_state['step'] == 'edit_id':
             content_id = text
             content_doc = get_content_info_for_edit(content_id)
             if content_doc:
-                # Store ID and move to the next step (edit_field)
                 user_state['data']['_id'] = content_id
                 user_state['step'] = 'edit_field'
                 
-                # Setup keyboard for field selection (Title, Type, etc.)
                 edit_fields = ['Title', 'Type', 'Thumbnail URL', 'Tags', 'Links']
                 keyboard_buttons = [[{'text': f'/edit_{f.lower().replace(" ", "_")}'}] for f in edit_fields]
                 keyboard_buttons.append([{'text': '/cancel'}])
@@ -372,14 +586,19 @@ def webhook():
                 
                 send_message(chat_id, info_text, {'keyboard': keyboard_buttons, 'resize_keyboard': True})
             else:
-                # If ID is not found or invalid, stay in 'edit_id' state and re-prompt
+                # Stays in 'edit_id' state to receive ID again
                 send_message(chat_id, "❌ Content ID not found or invalid. Try again or type **/cancel**.")
 
         # --- Generic Edit Field Handlers ---
         elif user_state['step'] == 'edit_field' and text.startswith('/edit_'):
             field = text.split('_', 1)[1]
             user_state['step'] = f'edit_new_{field}'
-            send_message(chat_id, f"➡️ Please send the **NEW value** for **{field.replace('_', ' ').title()}**.\n(For Links, send the **complete, updated list** of JSON links or the single new URL)")
+            
+            prompt = f"➡️ Please send the **NEW value** for **{field.replace('_', ' ').title()}**."
+            if field == 'links':
+                 prompt += "\n(For Links, send the **complete, updated list** of JSON links, or the single new URL for a movie.)"
+                 
+            send_message(chat_id, prompt)
             
         # --- Specific Edit Field Value Handlers ---
         elif user_state['step'].startswith('edit_new_'):
@@ -390,13 +609,12 @@ def webhook():
             if field == 'tags':
                 update_data['tags'] = [t.strip().lower() for t in text.split(',') if t.strip()]
             elif field == 'links':
-                # Revert to JSON input for EDITING links, as sequential editing is too complex for this bot
+                # Reverts to JSON input for EDITING links
                 try:
                     links = json.loads(text)
-                    if not isinstance(links, list): raise ValueError("Links must be a JSON array.")
+                    if not isinstance(links, list): raise ValueError
                     update_data['links'] = links
-                except (json.JSONDecodeError, ValueError) as e:
-                    # Fallback to single URL if JSON fails
+                except:
                     update_data['links'] = [{"url": text, "episode_title": "Watch Link"}]
             else:
                 update_data[field] = text
@@ -412,11 +630,16 @@ def webhook():
         
         elif user_state['step'] == 'delete_id':
             content_id = text
-            # The actual delete logic is inside admin_delete_content (called implicitly here)
-            if admin_delete_content(content_id) == ({"success": True, "message": "Content deleted successfully"}, 200):
-                send_message(chat_id, f"🗑️ **Success!** Content ID `{content_id}` has been deleted.", START_KEYBOARD)
-            else:
-                send_message(chat_id, f"❌ **Error:** Content ID `{content_id}` not found or invalid.", START_KEYBOARD)
+            # Directly call collection delete for simplicity in bot logic
+            try:
+                result = content_collection.delete_one({"_id": ObjectId(content_id)})
+                if result.deleted_count > 0:
+                    content_cache.clear()
+                    send_message(chat_id, f"🗑️ **Success!** Content ID `{content_id}` has been deleted.", START_KEYBOARD)
+                else:
+                    send_message(chat_id, f"❌ **Error:** Content ID `{content_id}` not found.", START_KEYBOARD)
+            except Exception:
+                send_message(chat_id, "❌ **Error:** Invalid Content ID format.", START_KEYBOARD)
 
             USER_STATE[chat_id] = {'step': 'main'}
             
@@ -428,25 +651,92 @@ def webhook():
         logger.error(f"Webhook error: {e}")
         return jsonify({"status": "error"}), 500
 
-# --- BACKGROUND TASKS and APPLICATION STARTUP remain the same ---
+# -------------------------------------------------------------
+# --- BACKGROUND TASKS (Moved to be defined before startup) ---
+# -------------------------------------------------------------
 
-# Note: The remaining Flask routes (index, health, API endpoints) from the previous full code are 
-# assumed to be present and unchanged (except for admin_update_content added previously and the delete logic check).
-# The flush_view_cache and application startup block also remains the same.
+def flush_view_cache():
+    """Periodically flush view count cache to database."""
+    while True:
+        time.sleep(30)  # Every 30 seconds
+        try:
+            with cache_lock:
+                if not view_count_cache:
+                    continue
+                    
+                bulk_ops = []
+                keys_to_reset = []
+                
+                for cache_key, count in list(view_count_cache.items()):
+                    if count > 0:
+                        content_id = cache_key.replace('views_', '')
+                        # Using pymongo.operations for bulk write efficiency
+                        bulk_ops.append(
+                            pymongo.operations.UpdateOne(
+                                {"_id": ObjectId(content_id)},
+                                {"$inc": {"views": count}}
+                            )
+                        )
+                        keys_to_reset.append(cache_key)
 
+                if bulk_ops and content_collection:
+                    content_collection.bulk_write(bulk_ops)
+                    
+                    for key in keys_to_reset:
+                        view_count_cache[key] = 0
+                
+                view_count_cache = {k: v for k, v in view_count_cache.items() if v > 0}
+                
+        except Exception as e:
+            logger.error(f"Error flushing view cache: {e}")
+
+# -------------------------------------------------------------
+# --- APPLICATION STARTUP ---
+# -------------------------------------------------------------
+
+def set_webhook():
+    """Set the webhook URL for Telegram."""
+    if not APP_URL or not BOT_TOKEN:
+        logger.warning("APP_URL or BOT_TOKEN not set. Skipping webhook setup.")
+        return False
+    
+    webhook_url = f"{APP_URL.rstrip('/')}/{BOT_TOKEN}"
+    url = TELEGRAM_API + "setWebhook"
+    
+    try:
+        response = requests.post(url, json={'url': webhook_url}, timeout=10)
+        response.raise_for_status()
+        result = response.json()
+        
+        if result.get('ok'):
+            logger.info(f"Webhook set successfully: {webhook_url}")
+            return True
+        else:
+            logger.error(f"Failed to set webhook: {result}")
+            return False
+    except Exception as e:
+        logger.error(f"Error setting webhook: {e}")
+        return False
+
+@app.before_request
+def before_request():
+    """Initialize connections before handling requests."""
+    global content_collection
+    if content_collection is None:
+        init_mongodb()
 
 if __name__ == '__main__':
     logger.info("Starting Optimized StreamHub Application...")
+    
+    # Initialize MongoDB explicitly on startup
     init_mongodb()
     
-    # Start background tasks
+    # Start background tasks (Now works because flush_view_cache is defined above)
     cache_thread = threading.Thread(target=flush_view_cache, daemon=True)
     cache_thread.start()
     
     if APP_URL and BOT_TOKEN:
-        # Note: The `set_webhook()` function needs to be explicitly defined or present.
-        # Assuming it's present from the previous code block.
-        pass
+        set_webhook()
     else:
         logger.warning("APP_URL or BOT_TOKEN not set - webhook not configured")
     
