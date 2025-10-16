@@ -255,13 +255,89 @@ def set_webhook():
 
 @app.route('/')
 def index():
-    """Health check endpoint."""
-    status = {
-        "status": "running",
-        "mongodb": "connected" if content_collection is not None else "disconnected",
-        "bot_token": "configured" if BOT_TOKEN else "missing"
-    }
-    return jsonify(status), 200
+    """Serve the frontend page."""
+    return '''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StreamHub - Movies & Series</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        header { text-align: center; color: white; margin-bottom: 40px; animation: fadeIn 0.8s ease-in; }
+        h1 { font-size: 3rem; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+        .subtitle { font-size: 1.2rem; opacity: 0.9; }
+        .filters { display: flex; justify-content: center; gap: 15px; margin-bottom: 30px; flex-wrap: wrap; }
+        .filter-btn { padding: 12px 30px; border: none; border-radius: 25px; background: white; color: #667eea; font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
+        .filter-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
+        .filter-btn.active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .loading { text-align: center; color: white; font-size: 1.5rem; margin: 50px 0; }
+        .spinner { border: 4px solid rgba(255,255,255,0.3); border-top: 4px solid white; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; margin: 20px auto; }
+        .content-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 30px; margin-bottom: 40px; }
+        .content-card { background: white; border-radius: 15px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.3); transition: all 0.3s ease; cursor: pointer; animation: fadeInUp 0.6s ease-out; }
+        .content-card:hover { transform: translateY(-10px); box-shadow: 0 15px 40px rgba(0,0,0,0.4); }
+        .card-image { width: 100%; height: 400px; object-fit: cover; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .card-content { padding: 20px; }
+        .card-type { display: inline-block; padding: 5px 15px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; margin-bottom: 10px; }
+        .type-movie { background: #ff6b6b; color: white; }
+        .type-series { background: #4ecdc4; color: white; }
+        .card-title { font-size: 1.4rem; font-weight: 700; color: #333; margin-bottom: 15px; }
+        .card-links { margin-top: 15px; }
+        .link-count { color: #666; font-size: 0.9rem; margin-bottom: 10px; }
+        .watch-btn { display: block; width: 100%; padding: 12px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.3s ease; }
+        .watch-btn:hover { transform: scale(1.05); box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4); }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; justify-content: center; align-items: center; padding: 20px; }
+        .modal.active { display: flex; }
+        .modal-content { background: white; border-radius: 20px; max-width: 600px; width: 100%; max-height: 80vh; overflow-y: auto; padding: 30px; position: relative; animation: modalSlideIn 0.3s ease-out; }
+        .close-btn { position: absolute; top: 15px; right: 15px; background: #ff6b6b; color: white; border: none; width: 35px; height: 35px; border-radius: 50%; font-size: 1.5rem; cursor: pointer; transition: all 0.3s ease; }
+        .close-btn:hover { transform: rotate(90deg); background: #ff5252; }
+        .modal-title { font-size: 2rem; color: #333; margin-bottom: 20px; padding-right: 40px; }
+        .links-list { list-style: none; }
+        .link-item { margin-bottom: 15px; }
+        .link-btn { display: block; width: 100%; padding: 15px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; border-radius: 10px; font-weight: 600; text-align: center; transition: all 0.3s ease; }
+        .link-btn:hover { transform: translateX(10px); box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4); }
+        .empty-state { text-align: center; color: white; padding: 60px 20px; }
+        .empty-icon { font-size: 5rem; margin-bottom: 20px; }
+        .empty-text { font-size: 1.5rem; margin-bottom: 10px; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes fadeInUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes modalSlideIn { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
+        @media (max-width: 768px) { h1 { font-size: 2rem; } .content-grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; } .card-image { height: 300px; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎬 StreamHub</h1>
+            <p class="subtitle">Your Ultimate Movie & Series Collection</p>
+        </header>
+        <div class="filters">
+            <button class="filter-btn active" data-filter="all">All Content</button>
+            <button class="filter-btn" data-filter="Movie">Movies</button>
+            <button class="filter-btn" data-filter="Series">Web Series</button>
+        </div>
+        <div id="loading" class="loading"><div class="spinner"></div><p>Loading awesome content...</p></div>
+        <div id="content-grid" class="content-grid"></div>
+        <div id="empty-state" class="empty-state" style="display: none;"><div class="empty-icon">📭</div><p class="empty-text">No content available yet</p><p>Use the Telegram bot to add your first movie or series!</p></div>
+    </div>
+    <div id="modal" class="modal"><div class="modal-content"><button class="close-btn" onclick="closeModal()">&times;</button><h2 class="modal-title" id="modal-title"></h2><ul class="links-list" id="links-list"></ul></div></div>
+    <script>
+        let allContent=[],currentFilter='all';const API_URL=window.location.origin+'/api/content';
+        async function fetchContent(){try{const r=await fetch(API_URL),d=await r.json();d.success?allContent=d.data:showEmptyState(),displayContent()}catch(e){console.error('Error:',e),showEmptyState()}finally{document.getElementById('loading').style.display='none'}}
+        function displayContent(){const g=document.getElementById('content-grid'),e=document.getElementById('empty-state');let f=currentFilter==='all'?allContent:allContent.filter(i=>i.type===currentFilter);if(f.length===0){g.innerHTML='';e.style.display='block';return}e.style.display='none';g.innerHTML=f.map(i=>`<div class="content-card" onclick="openModal('${i._id}')"><img class="card-image" src="${i.thumbnail_url}" alt="${i.title}" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22280%22 height=%22400%22%3E%3Crect fill=%22%23667eea%22 width=%22280%22 height=%22400%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 fill=%22white%22 text-anchor=%22middle%22 dy=%22.3em%22 font-size=%2224%22%3E${i.title}%3C/text%3E%3C/svg%3E'"><div class="card-content"><span class="card-type type-${i.type.toLowerCase()}">${i.type}</span><h3 class="card-title">${i.title}</h3><div class="card-links"><p class="link-count">📺 ${i.links.length} ${i.links.length===1?'Link':'Links'} Available</p><button class="watch-btn">Watch Now</button></div></div></div>`).join('')}
+        function showEmptyState(){document.getElementById('content-grid').innerHTML='';document.getElementById('empty-state').style.display='block'}
+        function openModal(id){const c=allContent.find(i=>i._id===id);if(!c)return;document.getElementById('modal-title').textContent=c.title;document.getElementById('links-list').innerHTML=c.links.map(l=>`<li class="link-item"><a href="${l.url}" target="_blank" class="link-btn">${l.episode_title}</a></li>`).join('');document.getElementById('modal').classList.add('active')}
+        function closeModal(){document.getElementById('modal').classList.remove('active')}
+        document.querySelectorAll('.filter-btn').forEach(b=>{b.addEventListener('click',()=>{document.querySelectorAll('.filter-btn').forEach(x=>x.classList.remove('active'));b.classList.add('active');currentFilter=b.dataset.filter;displayContent()})});
+        document.getElementById('modal').addEventListener('click',e=>{if(e.target.id==='modal')closeModal()});
+        document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
+        fetchContent();
+    </script>
+</body>
+</html>'''
 
 @app.route('/health')
 def health():
