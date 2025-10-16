@@ -9,6 +9,8 @@ from datetime import datetime
 import logging
 import time
 from functools import wraps
+import threading
+from cachetools import TTLCache
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -34,10 +36,10 @@ def init_mongodb():
         
         client = MongoClient(
             MONGODB_URI,
-            serverSelectionTimeoutMS=3000,  # Reduced timeout
+            serverSelectionTimeoutMS=3000,
             connectTimeoutMS=5000,
             socketTimeoutMS=10000,
-            maxPoolSize=50,  # Connection pooling
+            maxPoolSize=50,
             minPoolSize=10,
             maxIdleTimeMS=30000
         )
@@ -62,7 +64,7 @@ def init_mongodb():
         logger.error(f"MongoDB initialization failed: {e}")
         return False
 
-# --- 2. SIMPLE AUTHENTICATION (NO 2FA) ---
+# --- 2. SIMPLE AUTHENTICATION ---
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
@@ -76,34 +78,57 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# --- 3. OPTIMIZED VIEW COUNT FUNCTIONALITY ---
-# Cache for view counts to reduce database writes
+# --- 3. SIMPLE CACHING SYSTEM ---
+# Use TTLCache for automatic expiration
+content_cache = TTLCache(maxsize=100, ttl=30)  # Cache 100 items for 30 seconds
+
+def get_cache_key():
+    """Generate cache key from request path and query parameters."""
+    path = request.path
+    args = sorted(request.args.items())
+    return f"{path}?{str(args)}"
+
+def cached_response(timeout=30):
+    """Decorator for caching responses."""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            # Only cache GET requests
+            if request.method != 'GET':
+                return f(*args, **kwargs)
+            
+            cache_key = get_cache_key()
+            if cache_key in content_cache:
+                logger.info(f"Cache hit for {cache_key}")
+                return content_cache[cache_key]
+            
+            # Call the actual function
+            response = f(*args, **kwargs)
+            
+            # Cache successful responses
+            if response[1] == 200:
+                content_cache[cache_key] = response
+            
+            return response
+        return decorated_function
+    return decorator
+
+# --- 4. OPTIMIZED VIEW COUNT FUNCTIONALITY ---
 view_count_cache = {}
+cache_lock = threading.Lock()
 
 def increment_view_count(content_id):
-    """Increment view count for a content item with caching."""
+    """Increment view count for a content item with thread-safe caching."""
     if content_collection is None:
         return False
     
     try:
-        # Use cache key
-        cache_key = f"views_{content_id}"
-        if cache_key in view_count_cache:
-            view_count_cache[cache_key] += 1
-        else:
-            view_count_cache[cache_key] = get_view_count(content_id) + 1
-        
-        # Batch update every 10 views or after 30 seconds
-        if view_count_cache[cache_key] % 10 == 0:
-            result = content_collection.update_one(
-                {"_id": ObjectId(content_id)},
-                {
-                    "$inc": {"views": view_count_cache[cache_key]},
-                    "$set": {"last_viewed": datetime.utcnow()}
-                }
-            )
-            if result.modified_count > 0:
-                view_count_cache[cache_key] = 0  # Reset after successful update
+        with cache_lock:
+            cache_key = f"views_{content_id}"
+            if cache_key in view_count_cache:
+                view_count_cache[cache_key] += 1
+            else:
+                view_count_cache[cache_key] = 1
         
         return True
     except Exception as e:
@@ -118,84 +143,36 @@ def get_view_count(content_id):
     try:
         doc = content_collection.find_one(
             {"_id": ObjectId(content_id)}, 
-            {"views": 1}  # Projection for performance
+            {"views": 1}
         )
         return doc.get('views', 0) if doc else 0
     except Exception as e:
         logger.error(f"Error getting view count: {e}")
         return 0
 
-# --- 4. TELEGRAM AND FLASK SETUP ---
+# --- 5. TELEGRAM AND FLASK SETUP ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 APP_URL = os.environ.get("APP_URL")
 PORT = int(os.environ.get("PORT", 8000))
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is not set.")
+    logger.warning("BOT_TOKEN environment variable is not set. Telegram features disabled.")
 
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/" if BOT_TOKEN else None
 
 app = Flask(__name__)
 CORS(app)
 
-# Response caching
-from werkzeug.middleware.dispatcher import DispatcherMiddleware
-from werkzeug.wrappers import Response
-
-class CacheMiddleware:
-    def __init__(self, app):
-        self.app = app
-        self.cache = {}
-        self.cache_timeout = 30  # seconds
-
-    def __call__(self, environ, start_response):
-        path = environ.get('PATH_INFO', '')
-        method = environ.get('REQUEST_METHOD', 'GET')
-        
-        # Cache GET requests to /api/content
-        if method == 'GET' and path.startswith('/api/content'):
-            cache_key = path + '?' + environ.get('QUERY_STRING', '')
-            current_time = time.time()
-            
-            if cache_key in self.cache:
-                cached_data, timestamp = self.cache[cache_key]
-                if current_time - timestamp < self.cache_timeout:
-                    # Return cached response
-                    response = Response(cached_data, content_type='application/json')
-                    return response(environ, start_response)
-        
-        # Call the actual app
-        response = self.app(environ, start_response)
-        
-        # Cache successful responses
-        if method == 'GET' and path.startswith('/api/content') and response[1] == '200 OK':
-            # Store response data in cache
-            self.cache[cache_key] = (response[0], current_time)
-        
-        return response
-
-# Apply caching middleware
-app.wsgi_app = CacheMiddleware(app.wsgi_app)
-
 # Global state to track multi-step conversation
 USER_STATE = {}
 
-# FSM States
-STATE_START = 'START'
-STATE_WAITING_FOR_TYPE = 'WAITING_FOR_TYPE'
-STATE_WAITING_FOR_TITLE = 'WAITING_FOR_TITLE'
-STATE_WAITING_FOR_THUMBNAIL = 'WAITING_FOR_THUMBNAIL'
-STATE_WAITING_FOR_TAGS = 'WAITING_FOR_TAGS'
-STATE_WAITING_FOR_LINK_TITLE = 'WAITING_FOR_LINK_TITLE'
-STATE_WAITING_FOR_LINK_URL = 'WAITING_FOR_LINK_URL'
-STATE_CONFIRM_LINK = 'CONFIRM_LINK'
-STATE_WAITING_FOR_EDIT_FIELD = 'WAITING_FOR_EDIT_FIELD'
-STATE_WAITING_FOR_NEW_VALUE = 'WAITING_FOR_NEW_VALUE'
-STATE_CONFIRM_DELETE = 'CONFIRM_DELETE'
-
-# --- 5. OPTIMIZED BOT FUNCTIONS ---
+# --- 6. OPTIMIZED BOT FUNCTIONS ---
 def send_message(chat_id, text, reply_markup=None):
     """Sends a message back to the user with timeout."""
+    if not TELEGRAM_API:
+        logger.warning("Telegram bot token not configured")
+        return
+    
     url = TELEGRAM_API + "sendMessage"
     payload = {
         'chat_id': chat_id,
@@ -206,14 +183,14 @@ def send_message(chat_id, text, reply_markup=None):
         payload['reply_markup'] = json.dumps(reply_markup)
     
     try:
-        response = requests.post(url, json=payload, timeout=5)  # Reduced timeout
+        response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
         logger.info(f"Message sent to chat_id {chat_id}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Error sending message to {chat_id}: {e}")
 
 def save_content(content_data):
-    """Saves the complete content document to MongoDB with optimized write."""
+    """Saves the complete content document to MongoDB."""
     if content_collection is None: 
         return False
     try:
@@ -229,12 +206,16 @@ def save_content(content_data):
         }
         result = content_collection.insert_one(document)
         logger.info(f"Content saved with ID: {result.inserted_id}")
+        
+        # Clear cache when new content is added
+        content_cache.clear()
+        
         return True
     except Exception as e:
         logger.error(f"MongoDB Save Error: {e}")
         return False
 
-# --- 6. OPTIMIZED FLASK ROUTES ---
+# --- 7. OPTIMIZED FLASK ROUTES ---
 
 @app.route('/', methods=['GET'])
 def index():
@@ -250,7 +231,6 @@ def health():
     """Fast health check endpoint."""
     try:
         if content_collection is not None:
-            # Quick ping without full command
             client.admin.command('ping')
             return jsonify({
                 "status": "healthy", 
@@ -292,6 +272,9 @@ def track_view():
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
     """Fast webhook handler for Telegram updates."""
+    if not BOT_TOKEN:
+        return jsonify({"status": "telegram not configured"}), 200
+        
     try:
         update = request.get_json(silent=True)
         if not update:
@@ -311,6 +294,7 @@ def webhook():
         return jsonify({"status": "error"}), 500
 
 @app.route('/api/content', methods=['GET'])
+@cached_response(timeout=30)
 def get_content():
     """Fast content retrieval with pagination and caching."""
     if content_collection is None:
@@ -318,8 +302,8 @@ def get_content():
 
     try:
         # Pagination parameters
-        page = int(request.args.get('page', 1))
-        limit = min(int(request.args.get('limit', 20)), 50)  # Max 50 items
+        page = max(1, int(request.args.get('page', 1)))
+        limit = min(int(request.args.get('limit', 20)), 50)
         skip = (page - 1) * limit
         
         # Filter parameters
@@ -340,9 +324,14 @@ def get_content():
             'thumbnail_url': 1, 
             'tags': 1, 
             'views': 1, 
-            'created_at': 1
+            'created_at': 1,
+            'links': 1
         }
         
+        # Get total count first (for pagination)
+        total_count = content_collection.count_documents(query)
+        
+        # Get paginated results
         content_cursor = content_collection.find(
             query, 
             projection
@@ -355,9 +344,6 @@ def get_content():
             if 'created_at' in doc:
                 doc['created_at'] = doc['created_at'].isoformat()
             content_list.append(doc)
-        
-        # Get total count for pagination
-        total_count = content_collection.count_documents(query)
         
         return jsonify({
             "success": True,
@@ -375,6 +361,7 @@ def get_content():
         return jsonify({"success": False, "error": "Failed to retrieve content."}), 500
 
 @app.route('/api/content/<content_id>', methods=['GET'])
+@cached_response(timeout=30)
 def get_content_by_id(content_id):
     """Fast single content retrieval."""
     if content_collection is None:
@@ -399,6 +386,7 @@ def get_content_by_id(content_id):
         return jsonify({"success": False, "error": "Invalid content ID"}), 400
 
 @app.route('/api/content/similar/<tags>', methods=['GET'])
+@cached_response(timeout=30)
 def get_similar_content(tags):
     """Fast similar content retrieval."""
     if content_collection is None:
@@ -455,6 +443,8 @@ def admin_delete_content(content_id):
     try:
         result = content_collection.delete_one({"_id": ObjectId(content_id)})
         if result.deleted_count > 0:
+            # Clear cache when content is deleted
+            content_cache.clear()
             return jsonify({"success": True, "message": "Content deleted successfully"}), 200
         else:
             return jsonify({"success": False, "error": "Content not found"}), 404
@@ -463,19 +453,49 @@ def admin_delete_content(content_id):
         logger.error(f"Admin content deletion error: {e}")
         return jsonify({"success": False, "error": "Invalid content ID"}), 400
 
+# --- BACKGROUND TASKS ---
+
+def flush_view_cache():
+    """Periodically flush view count cache to database."""
+    while True:
+        time.sleep(30)  # Every 30 seconds
+        try:
+            with cache_lock:
+                if not view_count_cache:
+                    continue
+                    
+                for cache_key, count in list(view_count_cache.items()):
+                    if count > 0:
+                        content_id = cache_key.replace('views_', '')
+                        try:
+                            result = content_collection.update_one(
+                                {"_id": ObjectId(content_id)},
+                                {"$inc": {"views": count}}
+                            )
+                            if result.modified_count > 0:
+                                view_count_cache[cache_key] = 0
+                        except Exception as e:
+                            logger.error(f"Error updating views for {content_id}: {e}")
+                
+                # Clean up zero counts
+                view_count_cache = {k: v for k, v in view_count_cache.items() if v > 0}
+                
+        except Exception as e:
+            logger.error(f"Error flushing view cache: {e}")
+
 # --- APPLICATION STARTUP ---
 
 def set_webhook():
     """Set the webhook URL for Telegram."""
-    if not APP_URL:
-        logger.warning("APP_URL not set. Skipping webhook setup.")
+    if not APP_URL or not BOT_TOKEN:
+        logger.warning("APP_URL or BOT_TOKEN not set. Skipping webhook setup.")
         return False
     
     webhook_url = f"{APP_URL.rstrip('/')}/{BOT_TOKEN}"
     url = TELEGRAM_API + "setWebhook"
     
     try:
-        response = requests.post(url, json={'url': webhook_url}, timeout=5)
+        response = requests.post(url, json={'url': webhook_url}, timeout=10)
         response.raise_for_status()
         result = response.json()
         
@@ -495,28 +515,7 @@ def before_request():
     if content_collection is None:
         init_mongodb()
 
-# Background task to flush view count cache
-def flush_view_cache():
-    """Periodically flush view count cache to database."""
-    while True:
-        time.sleep(30)  # Every 30 seconds
-        try:
-            for cache_key, count in view_count_cache.items():
-                if count > 0:
-                    content_id = cache_key.replace('views_', '')
-                    content_collection.update_one(
-                        {"_id": ObjectId(content_id)},
-                        {"$inc": {"views": count}}
-                    )
-                    view_count_cache[cache_key] = 0
-        except Exception as e:
-            logger.error(f"Error flushing view cache: {e}")
-
 # Start background thread for cache flushing
-import threading
-cache_thread = threading.Thread(target=flush_view_cache, daemon=True)
-cache_thread.start()
-
 if __name__ == '__main__':
     logger.info("Starting Optimized StreamHub Application...")
     
@@ -525,10 +524,14 @@ if __name__ == '__main__':
     else:
         logger.warning("MongoDB initialization failed")
     
-    if APP_URL:
+    # Start background tasks
+    cache_thread = threading.Thread(target=flush_view_cache, daemon=True)
+    cache_thread.start()
+    
+    if APP_URL and BOT_TOKEN:
         set_webhook()
     else:
-        logger.warning("APP_URL not set - webhook not configured")
+        logger.warning("APP_URL or BOT_TOKEN not set - webhook not configured")
     
     logger.info(f"Starting optimized Flask app on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
