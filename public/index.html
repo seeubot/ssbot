@@ -3,417 +3,282 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>StreamHub - Movies & Series</title>
+    <title>StreamHub - Watch Free Online</title>
+    <!-- Load Tailwind CSS CDN for modern styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
     <style>
+        /* Custom styles for modern aesthetics and animations */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        
         * {
-            margin: 0;
-            padding: 0;
             box-sizing: border-box;
         }
 
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* Dark background */
         }
 
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
+        .gradient-text {
+            background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
 
-        header {
-            text-align: center;
-            color: white;
-            margin-bottom: 40px;
-            animation: fadeIn 0.8s ease-in;
-        }
-
-        h1 {
-            font-size: 3rem;
-            margin-bottom: 10px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-
-        .subtitle {
-            font-size: 1.2rem;
-            opacity: 0.9;
-        }
-
-        .filters {
-            display: flex;
-            justify-content: center;
-            gap: 15px;
-            margin-bottom: 30px;
-            flex-wrap: wrap;
-        }
-
-        .filter-btn {
-            padding: 12px 30px;
-            border: none;
-            border-radius: 25px;
-            background: white;
-            color: #667eea;
-            font-size: 1rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-        }
-
-        .filter-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
-        }
-
-        .filter-btn.active {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }
-
-        .loading {
-            text-align: center;
-            color: white;
-            font-size: 1.5rem;
-            margin: 50px 0;
+        .card-bg {
+            background-color: #161b22;
         }
 
         .spinner {
-            border: 4px solid rgba(255,255,255,0.3);
-            border-top: 4px solid white;
-            border-radius: 50%;
-            width: 50px;
-            height: 50px;
+            border-top-color: #a855f7;
             animation: spin 1s linear infinite;
-            margin: 20px auto;
-        }
-
-        .content-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-            gap: 30px;
-            margin-bottom: 40px;
-        }
-
-        .content-card {
-            background: white;
-            border-radius: 15px;
-            overflow: hidden;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
-            transition: all 0.3s ease;
-            cursor: pointer;
-            animation: fadeInUp 0.6s ease-out;
-        }
-
-        .content-card:hover {
-            transform: translateY(-10px);
-            box-shadow: 0 15px 40px rgba(0,0,0,0.4);
-        }
-
-        .card-image {
-            width: 100%;
-            height: 400px;
-            object-fit: cover;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }
-
-        .card-content {
-            padding: 20px;
-        }
-
-        .card-type {
-            display: inline-block;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-size: 0.85rem;
-            font-weight: 600;
-            margin-bottom: 10px;
-        }
-
-        .type-movie {
-            background: #ff6b6b;
-            color: white;
-        }
-
-        .type-series {
-            background: #4ecdc4;
-            color: white;
-        }
-
-        .card-title {
-            font-size: 1.4rem;
-            font-weight: 700;
-            color: #333;
-            margin-bottom: 15px;
-        }
-
-        .card-links {
-            margin-top: 15px;
-        }
-
-        .link-count {
-            color: #666;
-            font-size: 0.9rem;
-            margin-bottom: 10px;
-        }
-
-        .watch-btn {
-            display: block;
-            width: 100%;
-            padding: 12px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 1rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-
-        .watch-btn:hover {
-            transform: scale(1.05);
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-        }
-
-        .modal {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0,0,0,0.8);
-            z-index: 1000;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-
-        .modal.active {
-            display: flex;
-        }
-
-        .modal-content {
-            background: white;
-            border-radius: 20px;
-            max-width: 600px;
-            width: 100%;
-            max-height: 80vh;
-            overflow-y: auto;
-            padding: 30px;
-            position: relative;
-            animation: modalSlideIn 0.3s ease-out;
-        }
-
-        .close-btn {
-            position: absolute;
-            top: 15px;
-            right: 15px;
-            background: #ff6b6b;
-            color: white;
-            border: none;
-            width: 35px;
-            height: 35px;
-            border-radius: 50%;
-            font-size: 1.5rem;
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-
-        .close-btn:hover {
-            transform: rotate(90deg);
-            background: #ff5252;
-        }
-
-        .modal-title {
-            font-size: 2rem;
-            color: #333;
-            margin-bottom: 20px;
-            padding-right: 40px;
-        }
-
-        .links-list {
-            list-style: none;
-        }
-
-        .link-item {
-            margin-bottom: 15px;
-        }
-
-        .link-btn {
-            display: block;
-            width: 100%;
-            padding: 15px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            text-decoration: none;
-            border-radius: 10px;
-            font-weight: 600;
-            text-align: center;
-            transition: all 0.3s ease;
-        }
-
-        .link-btn:hover {
-            transform: translateX(10px);
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-        }
-
-        .empty-state {
-            text-align: center;
-            color: white;
-            padding: 60px 20px;
-        }
-
-        .empty-icon {
-            font-size: 5rem;
-            margin-bottom: 20px;
-        }
-
-        .empty-text {
-            font-size: 1.5rem;
-            margin-bottom: 10px;
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; }
-            to { opacity: 1; }
-        }
-
-        @keyframes fadeInUp {
-            from {
-                opacity: 0;
-                transform: translateY(30px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
         }
 
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
 
-        @keyframes modalSlideIn {
-            from {
-                opacity: 0;
-                transform: scale(0.9);
-            }
-            to {
-                opacity: 1;
-                transform: scale(1);
-            }
+        /* Responsive height for placeholder image */
+        .card-image-placeholder {
+            width: 100%;
+            height: 400px; 
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #21262d; 
+            color: #8b949e;
+            font-size: 1.5rem;
+            text-align: center;
         }
 
-        @media (max-width: 768px) {
-            h1 { font-size: 2rem; }
-            .content-grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; }
-            .card-image { height: 300px; }
+        .modal-bg {
+            background-color: rgba(0, 0, 0, 0.9);
+        }
+
+        .modal-content-custom {
+            background-color: #1f2937;
         }
     </style>
 </head>
-<body>
-    <div class="container">
-        <header>
-            <h1>🎬 StreamHub</h1>
-            <p class="subtitle">Your Ultimate Movie & Series Collection</p>
+<body class="min-h-screen p-4 sm:p-8">
+    <div class="max-w-7xl mx-auto">
+        
+        <!-- Header -->
+        <header class="text-center mb-10 pt-4 sm:pt-8 animate-in fade-in zoom-in duration-500">
+            <h1 class="text-5xl sm:text-7xl font-extrabold mb-2 gradient-text">
+                Advance Request
+            </h1>
+            <p class="text-xl sm:text-2xl text-gray-400 font-light">
+                Watch Free Online
+            </p>
         </header>
 
-        <div class="filters">
-            <button class="filter-btn active" data-filter="all">All Content</button>
-            <button class="filter-btn" data-filter="Movie">Movies</button>
-            <button class="filter-btn" data-filter="Series">Web Series</button>
+        <!-- Search Bar -->
+        <div class="flex justify-center mb-12">
+            <div class="relative w-full max-w-2xl">
+                <input 
+                    type="text" 
+                    id="search-input" 
+                    placeholder="Search for a movie or series..." 
+                    oninput="handleSearch()"
+                    class="w-full py-4 pl-12 pr-6 text-lg text-white card-bg rounded-xl shadow-2xl focus:ring-4 focus:ring-indigo-500 focus:border-indigo-500 border-2 border-transparent transition duration-300"
+                >
+                <svg class="absolute left-4 top-1/2 transform -translate-y-1/2 h-6 w-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+            </div>
         </div>
 
-        <div id="loading" class="loading">
-            <div class="spinner"></div>
-            <p>Loading awesome content...</p>
+        <!-- Loading State -->
+        <div id="loading" class="text-center py-20 text-white transition-opacity duration-500">
+            <div class="spinner w-12 h-12 mx-auto rounded-full border-4 border-gray-700"></div>
+            <p class="mt-4 text-lg text-gray-400">Loading your ultimate collection...</p>
         </div>
 
-        <div id="content-grid" class="content-grid"></div>
+        <!-- Content Grid -->
+        <div id="content-grid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
+            <!-- Content cards will be injected here -->
+        </div>
 
-        <div id="empty-state" class="empty-state" style="display: none;">
-            <div class="empty-icon">📭</div>
-            <p class="empty-text">No content available yet</p>
-            <p>Use the Telegram bot to add your first movie or series!</p>
+        <!-- Empty State -->
+        <div id="empty-state" class="text-center text-white py-20 hidden">
+            <div class="text-7xl mb-4">🤷‍♂️</div>
+            <p class="text-2xl font-semibold mb-2">Nothing found.</p>
+            <p class="text-gray-400">Try adjusting your search term or check back later!</p>
         </div>
     </div>
 
-    <div id="modal" class="modal">
-        <div class="modal-content">
-            <button class="close-btn" onclick="closeModal()">&times;</button>
-            <h2 class="modal-title" id="modal-title"></h2>
-            <ul class="links-list" id="links-list"></ul>
+    <!-- Watch Links Modal -->
+    <div id="modal" class="fixed inset-0 modal-bg z-50 flex items-center justify-center p-4 hidden transition duration-300 ease-out">
+        <div class="modal-content-custom rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 relative shadow-2xl transition-all duration-300">
+            <button class="close-btn absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white w-8 h-8 rounded-full text-xl leading-none transition-transform duration-300 transform hover:rotate-90" onclick="closeModal()">&times;</button>
+            <h2 class="text-3xl font-bold text-white mb-6 pr-8" id="modal-title"></h2>
+            
+            <ul class="space-y-4" id="links-list">
+                <!-- Links will be injected here -->
+            </ul>
         </div>
     </div>
+
+    <!-- Join Telegram Button (Fixed/Sticky) -->
+    <a href="https://t.me/+oOdTY-zbwCY3MzA1" target="_blank" class="fixed bottom-6 right-6 bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-3 px-6 rounded-full shadow-2xl transition duration-300 transform hover:scale-105 flex items-center z-40">
+        <!-- Inline Telegram Icon (SVG) -->
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 mr-2" viewBox="0 0 24 24" fill="currentColor"><path d="M18.3 5.4l-14.7 6.4c-.6.3-.6.7 0 1l3.5 1.1 9.1-5.7c.4-.3.7-.1.4.2l-7.3 6.6-1.9 4.8c-.2.6-.5.7-.9.4l-3.3-2.1c-.5-.3-.4-.5 0-.7l16.1-9.5c.6-.3.6-.6 0-.9z"/></svg>
+        Join Telegram
+    </a>
 
     <script>
-        let allContent = [];
-        let currentFilter = 'all';
+        // --- SECURITY/ANTI-INSPECTION LOGIC ---
+        
+        const TELEGRAM_URL = "https://t.me/+oOdTY-zbwCY3MzA1";
+        
+        /**
+         * Redirects the user to the Telegram channel.
+         */
+        function redirectTelegram() {
+            window.location.href = TELEGRAM_URL;
+        }
 
+        // 1. Disable Right-Click (Context Menu)
+        document.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            console.log("Right-click blocked. Redirecting...");
+            redirectTelegram();
+        });
+
+        // 2. Disable Keyboard Shortcuts (F12, Ctrl/Cmd + Shift + I/J/C/U)
+        document.addEventListener('keydown', function(e) {
+            // F12 key check
+            if (e.key === 'F12') {
+                e.preventDefault();
+                console.log("F12 blocked. Redirecting...");
+                redirectTelegram();
+            }
+
+            // Ctrl/Cmd Key combinations
+            if (e.ctrlKey || e.metaKey) { // metaKey is for Cmd on Mac
+                const key = e.key.toLowerCase();
+                // Ctrl+Shift+I (Developer Tools), Ctrl+Shift+J (Console), Ctrl+Shift+C (Element Selector), Ctrl+U (View Source)
+                if ((e.shiftKey && (key === 'i' || key === 'j' || key === 'c')) || key === 'u') {
+                    e.preventDefault();
+                    console.log("Keyboard shortcut blocked. Redirecting...");
+                    redirectTelegram();
+                }
+            }
+        });
+
+        // --- APPLICATION LOGIC ---
+
+        let allContent = [];
         // API endpoint - will be automatically set to your Koyeb URL
         const API_URL = window.location.origin + '/api/content';
 
+        /**
+         * Fetches all content from the API.
+         */
         async function fetchContent() {
             try {
                 const response = await fetch(API_URL);
                 const result = await response.json();
                 
-                if (result.success) {
+                if (result.success && Array.isArray(result.data)) {
                     allContent = result.data;
                     displayContent();
                 } else {
-                    showEmptyState();
+                    showEmptyState("No content available yet. Use the Telegram bot to add your first movie or series!");
                 }
             } catch (error) {
                 console.error('Error fetching content:', error);
-                showEmptyState();
+                showEmptyState("Failed to load content. Check your network connection or API.");
             } finally {
-                document.getElementById('loading').style.display = 'none';
+                // Hide loading spinner
+                document.getElementById('loading').classList.add('hidden');
             }
         }
 
+        /**
+         * Filters content based on the search input and renders the grid.
+         */
         function displayContent() {
             const grid = document.getElementById('content-grid');
             const emptyState = document.getElementById('empty-state');
+            const searchTerm = document.getElementById('search-input').value.toLowerCase().trim();
             
-            let filteredContent = currentFilter === 'all' 
-                ? allContent 
-                : allContent.filter(item => item.type === currentFilter);
+            // Filter logic based on title
+            const filteredContent = allContent.filter(item => 
+                item.title && item.title.toLowerCase().includes(searchTerm)
+            );
 
             if (filteredContent.length === 0) {
                 grid.innerHTML = '';
-                emptyState.style.display = 'block';
+                emptyState.classList.remove('hidden');
                 return;
             }
 
-            emptyState.style.display = 'none';
+            emptyState.classList.add('hidden');
             
-            grid.innerHTML = filteredContent.map(item => `
-                <div class="content-card" onclick="openModal('${item._id}')">
-                    <img class="card-image" 
-                         src="${item.thumbnail_url}" 
-                         alt="${item.title}"
-                         onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22280%22 height=%22400%22%3E%3Crect fill=%22%23667eea%22 width=%22280%22 height=%22400%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 fill=%22white%22 text-anchor=%22middle%22 dy=%22.3em%22 font-size=%2224%22%3E${item.title}%3C/text%3E%3C/svg%3E'">
-                    <div class="card-content">
-                        <span class="card-type type-${item.type.toLowerCase()}">${item.type}</span>
-                        <h3 class="card-title">${item.title}</h3>
-                        <div class="card-links">
-                            <p class="link-count">📺 ${item.links.length} ${item.links.length === 1 ? 'Link' : 'Links'} Available</p>
-                            <button class="watch-btn">Watch Now</button>
+            grid.innerHTML = filteredContent.map(item => {
+                // Determine card color based on type
+                const typeClass = item.type === 'Movie' 
+                    ? 'bg-red-600' 
+                    : 'bg-green-500';
+                
+                // Placeholder SVG for image error (using a cleaner method)
+                const fallbackImage = 'https://placehold.co/280x400/21262d/8b949e?text=' + encodeURIComponent(item.title || 'No Title');
+
+                return `
+                    <div class="content-card card-bg rounded-xl overflow-hidden shadow-xl hover:shadow-2xl transform hover:-translate-y-2 transition duration-300 cursor-pointer group" onclick="openModal('${item._id}')">
+                        <div class="relative">
+                            <img class="w-full h-96 object-cover transition-opacity duration-300 group-hover:opacity-80" 
+                                 src="${item.thumbnail_url}" 
+                                 alt="${item.title}"
+                                 onerror="this.onerror=null;this.src='${fallbackImage}';">
+                            
+                            <span class="absolute top-3 left-3 px-3 py-1 text-sm font-semibold text-white rounded-full ${typeClass} shadow-md">
+                                ${item.type}
+                            </span>
+                        </div>
+                        <div class="p-5">
+                            <h3 class="text-xl font-bold text-white mb-2 truncate">${item.title}</h3>
+                            <p class="text-gray-400 text-sm mb-4">
+                                🔗 ${item.links.length} ${item.links.length === 1 ? 'Link' : 'Links'} Available
+                            </p>
+                            <button class="w-full py-3 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition duration-300 shadow-lg hover:shadow-xl">
+                                Watch Now
+                            </button>
                         </div>
                     </div>
-                </div>
-            `).join('');
+                `;
+            }).join('');
         }
 
-        function showEmptyState() {
-            document.getElementById('content-grid').innerHTML = '';
-            document.getElementById('empty-state').style.display = 'block';
+        /**
+         * Updates the content display when the user types in the search bar.
+         */
+        let searchTimeout;
+        function handleSearch() {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                displayContent();
+            }, 300); // Debounce for performance
         }
 
+        /**
+         * Updates the empty state message.
+         */
+        function showEmptyState(message) {
+            const grid = document.getElementById('content-grid');
+            const emptyState = document.getElementById('empty-state');
+            grid.innerHTML = '';
+            // Basic parsing of message for multi-line display
+            const parts = message.split('.');
+            emptyState.querySelector('p:nth-child(2)').textContent = parts[0] || 'No content found.';
+            emptyState.querySelector('p:nth-child(3)').textContent = parts[1] ? parts[1].trim() : '';
+            emptyState.classList.remove('hidden');
+        }
+
+
+        /**
+         * Opens the modal with links for the selected content.
+         */
         function openModal(contentId) {
             const content = allContent.find(item => item._id === contentId);
             if (!content) return;
@@ -423,28 +288,23 @@
             const linksList = document.getElementById('links-list');
             linksList.innerHTML = content.links.map(link => `
                 <li class="link-item">
-                    <a href="${link.url}" target="_blank" class="link-btn">
+                    <a href="${link.url}" target="_blank" class="block py-4 px-6 bg-gray-700 text-white font-medium rounded-xl hover:bg-indigo-600 transition duration-300 text-center shadow-md">
                         ${link.episode_title}
                     </a>
                 </li>
             `).join('');
 
-            document.getElementById('modal').classList.add('active');
+            document.getElementById('modal').classList.remove('hidden');
+            document.getElementById('modal').classList.add('flex');
         }
 
+        /**
+         * Closes the modal.
+         */
         function closeModal() {
-            document.getElementById('modal').classList.remove('active');
+            document.getElementById('modal').classList.add('hidden');
+            document.getElementById('modal').classList.remove('flex');
         }
-
-        // Filter buttons
-        document.querySelectorAll('.filter-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                currentFilter = btn.dataset.filter;
-                displayContent();
-            });
-        });
 
         // Close modal on outside click
         document.getElementById('modal').addEventListener('click', (e) => {
@@ -465,3 +325,4 @@
     </script>
 </body>
 </html>
+
