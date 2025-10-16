@@ -11,7 +11,7 @@ import time
 from functools import wraps
 import threading
 from cachetools import TTLCache
-import pymongo.operations # Import for bulk write operations
+import pymongo.operations 
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -37,7 +37,6 @@ def init_mongodb():
         
         client = MongoClient(
             MONGODB_URI,
-            # Increased timeout slightly due to previous log errors
             serverSelectionTimeoutMS=5000, 
             connectTimeoutMS=5000,
             socketTimeoutMS=10000,
@@ -46,7 +45,6 @@ def init_mongodb():
             maxIdleTimeMS=30000
         )
         
-        # Test connection
         client.admin.command('ping')
         
         db_name = os.environ.get("DB_NAME", "streamhub")
@@ -55,7 +53,6 @@ def init_mongodb():
         db = client[db_name]
         content_collection = db[collection_name]
         
-        # Create indexes for better performance
         content_collection.create_index([("created_at", -1)])
         content_collection.create_index([("tags", 1)])
         content_collection.create_index([("views", -1)])
@@ -469,7 +466,7 @@ def admin_delete_content(content_id):
         logger.error(f"Admin content deletion error: {e}")
         return jsonify({"success": False, "error": "Invalid content ID"}), 400
 
-# --- TELEGRAM WEBHOOK HANDLER (FIXED BOT LOGIC) ---
+# --- TELEGRAM WEBHOOK HANDLER ---
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
@@ -564,7 +561,7 @@ def webhook():
             user_state['step'] = 'add_episode_title'
             send_message(chat_id, f"✅ Link saved. Current links: {len(user_state['data']['links'])}. Send the **NEXT Episode Title** or type **DONE**.")
             
-        # --- EDIT FLOW FIX ---
+        # --- EDIT FLOW ---
         
         elif user_state['step'] == 'edit_id':
             content_id = text
@@ -586,7 +583,6 @@ def webhook():
                 
                 send_message(chat_id, info_text, {'keyboard': keyboard_buttons, 'resize_keyboard': True})
             else:
-                # Stays in 'edit_id' state to receive ID again
                 send_message(chat_id, "❌ Content ID not found or invalid. Try again or type **/cancel**.")
 
         # --- Generic Edit Field Handlers ---
@@ -609,7 +605,6 @@ def webhook():
             if field == 'tags':
                 update_data['tags'] = [t.strip().lower() for t in text.split(',') if t.strip()]
             elif field == 'links':
-                # Reverts to JSON input for EDITING links
                 try:
                     links = json.loads(text)
                     if not isinstance(links, list): raise ValueError
@@ -630,7 +625,6 @@ def webhook():
         
         elif user_state['step'] == 'delete_id':
             content_id = text
-            # Directly call collection delete for simplicity in bot logic
             try:
                 result = content_collection.delete_one({"_id": ObjectId(content_id)})
                 if result.deleted_count > 0:
@@ -652,13 +646,14 @@ def webhook():
         return jsonify({"status": "error"}), 500
 
 # -------------------------------------------------------------
-# --- BACKGROUND TASKS (Moved to be defined before startup) ---
+# --- BACKGROUND TASKS (FIXED) ---
 # -------------------------------------------------------------
 
 def flush_view_cache():
     """Periodically flush view count cache to database."""
+    global view_count_cache # Explicitly declare global to modify the dictionary
     while True:
-        time.sleep(30)  # Every 30 seconds
+        time.sleep(30)
         try:
             with cache_lock:
                 if not view_count_cache:
@@ -667,10 +662,10 @@ def flush_view_cache():
                 bulk_ops = []
                 keys_to_reset = []
                 
-                for cache_key, count in list(view_count_cache.items()):
+                # Use list() to iterate over a copy while modifying the dictionary safely later
+                for cache_key, count in list(view_count_cache.items()): 
                     if count > 0:
                         content_id = cache_key.replace('views_', '')
-                        # Using pymongo.operations for bulk write efficiency
                         bulk_ops.append(
                             pymongo.operations.UpdateOne(
                                 {"_id": ObjectId(content_id)},
@@ -682,10 +677,10 @@ def flush_view_cache():
                 if bulk_ops and content_collection:
                     content_collection.bulk_write(bulk_ops)
                     
+                    # Reset the counters and remove keys where count is zero
                     for key in keys_to_reset:
-                        view_count_cache[key] = 0
-                
-                view_count_cache = {k: v for k, v in view_count_cache.items() if v > 0}
+                        if key in view_count_cache:
+                            del view_count_cache[key] # Remove the key entirely after flushing
                 
         except Exception as e:
             logger.error(f"Error flushing view cache: {e}")
@@ -704,7 +699,8 @@ def set_webhook():
     url = TELEGRAM_API + "setWebhook"
     
     try:
-        response = requests.post(url, json={'url': webhook_url}, timeout=10)
+        # Increased timeout for webhook setting as it previously timed out
+        response = requests.post(url, json={'url': webhook_url}, timeout=15) 
         response.raise_for_status()
         result = response.json()
         
@@ -728,10 +724,9 @@ def before_request():
 if __name__ == '__main__':
     logger.info("Starting Optimized StreamHub Application...")
     
-    # Initialize MongoDB explicitly on startup
     init_mongodb()
     
-    # Start background tasks (Now works because flush_view_cache is defined above)
+    # Start background tasks
     cache_thread = threading.Thread(target=flush_view_cache, daemon=True)
     cache_thread.start()
     
