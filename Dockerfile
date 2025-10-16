@@ -16,5 +16,6 @@ COPY app.py .
 EXPOSE 8000
 
 # Command to run the application using gunicorn. 
-# Explicitly setting workers/threads prevents unexpected shutdown (exit code 0).
-CMD ["gunicorn", "--workers", "2", "--threads", "4", "--bind", "0.0.0.0:8000", "app:app"]
+# Added --timeout 60 to prevent premature worker shutdown/health check failures.
+CMD ["gunicorn", "--workers", "2", "--threads", "4", "--timeout", "60", "--bind", "0.0.0.0:8000", "app:app"]
+
