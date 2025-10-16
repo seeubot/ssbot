@@ -24,9 +24,8 @@
 <body class="bg-gray-900 text-gray-100 min-h-screen p-4 sm:p-8">
 
     <script>
-        // NOTE: The APP_URL must be set in your Koyeb environment variables for the frontend to work.
-        // If running locally, you must replace the placeholder with your server's address (e.g., 'http://localhost:5000').
-        const APP_URL = "https://confident-jemima-school1660440-5a325843.koyeb.app"; // REPLACE THIS PLACEHOLDER IN YOUR DEPLOYED CODE IF NEEDED
+        // *** APP_URL set using the value you provided ***
+        const APP_URL = "https://confident-jemima-school1660440-5a325843.koyeb.app";
         const API_ENDPOINT = `${APP_URL}/api/content`;
         
         let fetchInterval;
@@ -36,6 +35,12 @@
         /** Fetches content from the backend API. */
         const fetchContent = async () => {
             const listContainer = document.getElementById('content-list');
+            listContainer.innerHTML = `
+                <div class="col-span-full text-center p-12 text-gray-500">
+                    <div class="animate-spin inline-block w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full mr-2"></div>
+                    Refreshing content...
+                </div>`;
+            
             try {
                 const response = await fetch(API_ENDPOINT);
                 
@@ -50,8 +55,8 @@
                 console.error("Error fetching content from API:", error);
                 listContainer.innerHTML = `
                     <div class="col-span-full text-center p-12 text-red-500">
-                        <p>❌ Error fetching content data: Could not connect to the backend API.</p>
-                        <p>Check the server status and the APP_URL environment variable.</p>
+                        <p>❌ Error fetching content data: Could not connect to the backend API or API is down.</p>
+                        <p>Verify your Koyeb backend service is running and the MONGODB_URI is correct.</p>
                     </div>`;
             }
         };
@@ -65,7 +70,7 @@
                 listContainer.innerHTML = `
                     <div class="col-span-full text-center p-12 text-gray-500">
                         <p>No content has been uploaded by the admin yet.</p>
-                        <p>Upload a movie or web series using your Telegram bot.</p>
+                        <p>Use your Telegram bot to upload a movie or web series.</p>
                     </div>`;
                 return;
             }
@@ -116,7 +121,7 @@
                 linkElement.className = "block bg-gray-700 hover:bg-gray-600 p-3 rounded-lg text-white font-medium mb-2 transition-colors duration-200 truncate";
                 linkElement.textContent = link.episode_title || (item.type === 'Movie' ? 'Stream Link' : `Episode ${index + 1}`);
 
-                // Simple mechanism to copy the URL (since direct link copying may fail in iframes)
+                // Simple mechanism to copy the URL 
                 linkElement.addEventListener('click', (e) => {
                     // Prevent default navigation for a moment to copy
                     e.preventDefault();
@@ -194,11 +199,7 @@
     <!-- Content Display Area -->
     <main>
         <div id="content-list" class="grid-auto-fit">
-            <!-- Loading message -->
-            <div class="col-span-full text-center p-12 text-gray-500">
-                <div class="animate-spin inline-block w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full mr-2"></div>
-                Loading content...
-            </div>
+            <!-- Content will be injected here -->
         </div>
     </main>
 
