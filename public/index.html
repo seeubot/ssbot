@@ -51,11 +51,6 @@
 </head>
 <body class="min-h-screen p-4 sm:p-8">
     
-    <div id="admin-panel" class="fixed top-4 left-4 bg-gray-800 p-4 rounded-lg z-50 hidden border border-gray-700 shadow-xl">
-        <h3 class="text-white font-bold mb-3 border-b border-gray-700 pb-1">Admin Panel</h3>
-        <input type="text" id="2fa-token" placeholder="2FA Token" class="p-2 w-full text-white bg-gray-700 rounded mb-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition" />
-        <button onclick="verifyAdmin()" class="w-full bg-blue-600 hover:bg-blue-700 text-white p-2 rounded font-semibold transition duration-200">Verify</button>
-    </div>
     <div class="max-w-7xl mx-auto">
         
         <header class="text-center mb-10 pt-4 sm:pt-8">
@@ -118,7 +113,16 @@
         </div>
     </div>
 
-    <div class="fixed bottom-6 right-6 flex flex-col space-y-3">
+    <div class="fixed bottom-6 left-6 flex flex-col space-y-3 z-40">
+        <button onclick="toggleAdminPanel()" class="bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-3 px-6 rounded-full shadow-2xl transition duration-300 transform hover:scale-105 flex items-center">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+            Admin 2FA
+        </button>
+    </div>
+    
+    <div class="fixed bottom-6 right-6 flex flex-col space-y-3 z-40">
         <a href="https://teluguxxx.vercel.app/" target="_blank" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-full shadow-2xl transition duration-300 transform hover:scale-105 flex items-center">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 mr-2" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21.68l-7.76-13.44h15.52L12 21.68zM12 2.32L4.24 15.76h15.52L12 2.32z"/></svg>
             Visit Official
@@ -129,6 +133,57 @@
         </a>
     </div>
 
+    <div id="2fa-modal" class="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-4 hidden">
+        <div class="bg-gray-800 rounded-xl max-w-md w-full max-h-[90vh] overflow-y-auto p-6 relative border border-gray-700 shadow-2xl">
+            <button class="close-btn absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white w-8 h-8 rounded-full text-xl leading-none transition-transform duration-300 transform hover:rotate-90" onclick="close2FAModal()">&times;</button>
+            
+            <h2 class="text-3xl font-bold text-blue-400 mb-6 text-center">🔐 Admin 2FA Setup</h2>
+            
+            <div class="mb-6">
+                <h3 class="text-xl font-bold mb-3 text-white">Step 1: Generate QR Code</h3>
+                <button onclick="setup2FA()" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-lg transition duration-300">
+                    Generate QR Code for Google Authenticator
+                </button>
+                <div id="qr-container" class="mt-4 hidden text-center">
+                    <img id="qr-image" class="mx-auto border-4 border-white rounded-lg max-w-xs">
+                    <p id="secret-text" class="text-yellow-400 mt-3 text-sm font-mono bg-gray-900 p-2 rounded"></p>
+                    <p class="text-gray-400 text-sm mt-2">Scan with Google Authenticator app or enter the secret manually</p>
+                </div>
+            </div>
+
+            <div class="mb-6">
+                <h3 class="text-xl font-bold mb-3 text-white">Step 2: Verify Setup</h3>
+                <div class="flex space-x-2">
+                    <input type="text" id="verify-code" placeholder="Enter 6-digit code" 
+                            class="flex-1 bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-600 focus:border-green-500 focus:ring-2 focus:ring-green-500">
+                    <button onclick="verify2FA()" class="bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded-lg transition duration-300">
+                        Verify
+                    </button>
+                </div>
+                <div id="verify-result" class="mt-2"></div>
+            </div>
+
+            <div class="mb-6">
+                <h3 class="text-xl font-bold mb-3 text-white">Step 3: Test Protected Access</h3>
+                <div class="flex space-x-2">
+                    <input type="text" id="test-code" placeholder="Enter 6-digit code" 
+                            class="flex-1 bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-600 focus:border-purple-500 focus:ring-2 focus:ring-purple-500">
+                    <button onclick="testProtected()" class="bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded-lg transition duration-300">
+                        Test
+                    </button>
+                </div>
+                <div id="test-result" class="mt-2"></div>
+            </div>
+
+            <div class="text-center pt-4 border-t border-gray-700">
+                <button onclick="check2FAStatus()" class="bg-gray-600 hover:bg-gray-700 text-white py-2 px-4 rounded-lg transition duration-300 text-sm">
+                    Check 2FA Status
+                </button>
+                <div id="status-result" class="mt-2"></div>
+            </div>
+        </div>
+    </div>
+    
     <script>
         // --- SECURITY/ANTI-INSPECTION LOGIC (UNCHANGED) ---
         const TELEGRAM_URL = "https://t.me/+oOdTY-zbwCY3MzA1";
@@ -156,14 +211,12 @@
             }
         });
 
-        // --- APPLICATION LOGIC (CRITICAL CHANGE HERE) ---
+        // --- APPLICATION LOGIC ---
         let allContent = [];
         
         // !!! IMPORTANT: REPLACE THIS PLACEHOLDER WITH YOUR KOYEB/BACKEND APP URL !!!
-        // This MUST be the URL of your Python Flask/API server, NOT the Vercel URL.
-        const API_BASE_URL = 'https://confident-jemima-school1660440-5a325843.koyeb.app'; // e.g., https://my-streamhub-app.koyeb.app
+        const API_BASE_URL = 'https://confident-jemima-school1660440-5a325843.koyeb.app'; 
         
-        // API Endpoints now use the hardcoded base URL
         const API_URL = API_BASE_URL + '/api/content';
         const SIMILAR_API_URL = API_BASE_URL + '/api/content/similar/';
         
@@ -272,7 +325,6 @@
 
         /**
          * Handles the click action on a content card based on content type.
-         * Now tracks the view before redirecting or opening the modal.
          */
         function handleCardClick(contentId, contentType) {
             const content = allContent.find(item => item._id === contentId);
@@ -396,41 +448,178 @@
             }
         }
 
-        // --- NEW ADMIN PANEL FUNCTIONS START ---
-        
+        // ------------------------------------
+        // --- NEW 2FA ADMIN PANEL FUNCTIONS ---
+        // ------------------------------------
+
         /**
-         * Shows the hidden admin panel overlay.
+         * Toggles the visibility of the new 2FA setup modal.
          */
-        function showAdminPanel() {
-            document.getElementById('admin-panel').classList.remove('hidden');
+        function toggleAdminPanel() {
+            document.getElementById('2fa-modal').classList.toggle('hidden');
+            document.getElementById('2fa-modal').classList.toggle('flex');
+            check2FAStatus(); // Check status whenever the modal is opened
         }
 
         /**
-         * Sends the 2FA token to the backend for verification.
+         * Closes the new 2FA setup modal.
          */
-        async function verifyAdmin() {
-            const token = document.getElementById('2fa-token').value;
-            const response = await fetch(API_BASE_URL + '/api/auth/verify-2fa', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                // Assuming 'admin' is the hardcoded username for the admin panel
-                body: JSON.stringify({username: 'admin', token: token}) 
-            });
-            
-            const result = await response.json();
-            if (response.ok && result.success) { // Check response.ok for better error handling
-                alert('Admin access granted!');
-                // Placeholder: Here you would typically store the token/session and show admin buttons/links
-                // For now, we'll just hide the panel on success.
-                document.getElementById('admin-panel').classList.add('hidden'); 
-            } else {
-                // Use the error message from the backend if available
-                alert(result.message || 'Invalid 2FA token or server error.'); 
+        function close2FAModal() {
+            document.getElementById('2fa-modal').classList.add('hidden');
+            document.getElementById('2fa-modal').classList.remove('flex');
+        }
+        
+        /**
+         * Sends a request to the backend to generate the 2FA QR code and secret.
+         */
+        async function setup2FA() {
+            try {
+                const response = await fetch(API_BASE_URL + '/api/auth/2fa-setup', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        username: 'admin',
+                        password: 'admin123' // NOTE: Hardcoded password should be handled securely in a real app
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.success) { 
+                    document.getElementById('qr-image').src = data.qr_code;
+                    document.getElementById('secret-text').textContent = 'Secret: ' + data.secret;
+                    document.getElementById('qr-container').classList.remove('hidden');
+                    
+                    showMessage('QR code generated successfully! Scan it with Google Authenticator.', 'success');
+                } else {
+                    showMessage('Error: ' + (data.error || 'Setup failed.'), 'error');
+                }
+            } catch (error) {
+                console.error('Setup error:', error);
+                showMessage('Setup failed: ' + error.message, 'error');
             }
         }
-        
-        // --- NEW ADMIN PANEL FUNCTIONS END ---
 
+        /**
+         * Verifies the 2FA setup with a code from the authenticator app.
+         */
+        async function verify2FA() {
+            const code = document.getElementById('verify-code').value.trim();
+            if (!code || code.length !== 6) {
+                showMessage('Please enter a valid 6-digit code', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(API_BASE_URL + '/api/auth/verify-2fa', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        username: 'admin',
+                        token: code
+                    })
+                });
+                
+                const data = await response.json();
+                const resultDiv = document.getElementById('verify-result');
+                
+                if (response.ok && data.success) {
+                    resultDiv.innerHTML = '<p class="text-green-400 text-center">✅ 2FA Verified Successfully!</p>';
+                    showMessage('2FA setup completed! You can now use codes from Google Authenticator.', 'success');
+                } else {
+                    resultDiv.innerHTML = '<p class="text-red-400 text-center">❌ ' + (data.error || 'Invalid code.') + '</p>';
+                }
+            } catch (error) {
+                console.error('Verify error:', error);
+                showMessage('Verification failed: ' + error.message, 'error');
+            }
+        }
+
+        /**
+         * Tests access to a protected route using the 2FA code as a Bearer token.
+         */
+        async function testProtected() {
+            const code = document.getElementById('test-code').value.trim();
+            if (!code || code.length !== 6) {
+                showMessage('Please enter a valid 6-digit code', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(API_BASE_URL + '/api/auth/protected-test', {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': 'Bearer ' + code
+                    }
+                });
+                
+                const data = await response.json();
+                const resultDiv = document.getElementById('test-result');
+                
+                if (response.ok) {
+                    resultDiv.innerHTML = '<p class="text-green-400 text-center">✅ Access Granted!</p>';
+                } else {
+                    resultDiv.innerHTML = '<p class="text-red-400 text-center">❌ ' + (data.error || 'Access Denied.') + '</p>';
+                }
+            } catch (error) {
+                console.error('Test error:', error);
+                showMessage('Test failed: ' + error.message, 'error');
+            }
+        }
+
+        /**
+         * Checks the current 2FA status on the backend.
+         */
+        async function check2FAStatus() {
+            try {
+                const response = await fetch(API_BASE_URL + '/api/auth/status');
+                const data = await response.json();
+                const statusDiv = document.getElementById('status-result');
+                
+                if (data.success) {
+                    if (data.is_2fa_enabled) {
+                        statusDiv.innerHTML = '<p class="text-green-400 text-center">✅ 2FA is Enabled</p>';
+                    } else {
+                        statusDiv.innerHTML = '<p class="text-yellow-400 text-center">⚠️ 2FA Not Setup</p>';
+                    }
+                }
+            } catch (error) {
+                console.error('Status check failed:', error);
+                document.getElementById('status-result').innerHTML = '<p class="text-red-400 text-center">❌ Status check failed.</p>';
+            }
+        }
+
+        /**
+         * Displays a toast notification message.
+         */
+        function showMessage(message, type) {
+            // Create toast notification
+            const toast = document.createElement('div');
+            toast.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 transition-transform duration-300 transform translate-x-full ${
+                type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
+            }`;
+            toast.textContent = message;
+            
+            document.body.appendChild(toast);
+            
+            // Animate in
+            setTimeout(() => {
+                toast.classList.remove('translate-x-full');
+            }, 100);
+            
+            // Remove after 5 seconds
+            setTimeout(() => {
+                toast.classList.add('translate-x-full');
+                setTimeout(() => {
+                    document.body.removeChild(toast);
+                }, 300);
+            }, 5000);
+        }
+
+        // Close modal on outside click
+        document.getElementById('2fa-modal').addEventListener('click', (e) => {
+            if (e.target.id === '2fa-modal') close2FAModal();
+        });
 
         // Universal Escape key listener for the modal
         document.addEventListener('keydown', (e) => {
@@ -438,9 +627,12 @@
                 if (!document.getElementById('links-modal').classList.contains('hidden')) {
                     closeLinksModal();
                 }
+                if (!document.getElementById('2fa-modal').classList.contains('hidden')) {
+                    close2FAModal();
+                }
             }
         });
-        
+
         // Close modal on outside click
         document.getElementById('links-modal').addEventListener('click', (e) => {
             if (e.target.id === 'links-modal') closeLinksModal();
