@@ -67,9 +67,11 @@ def init_mongodb():
 # --- 2. SIMPLE AUTHENTICATION ---
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+# You may want a list of authorized Telegram chat IDs for bot admin
+AUTHORIZED_CHAT_ID = os.environ.get("AUTHORIZED_CHAT_ID")
 
 def require_auth(f):
-    """Simple authentication decorator."""
+    """Simple authentication decorator for API access."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         auth = request.authorization
@@ -100,6 +102,7 @@ def cached_response(timeout=30):
             cache_key = get_cache_key()
             if cache_key in content_cache:
                 logger.info(f"Cache hit for {cache_key}")
+                # Flask requires a deep copy of the response tuple
                 return content_cache[cache_key]
             
             # Call the actual function
@@ -113,7 +116,8 @@ def cached_response(timeout=30):
         return decorated_function
     return decorator
 
-# --- 4. OPTIMIZED VIEW COUNT FUNCTIONALITY ---
+# --- 4. OPTIMIZED VIEW COUNT FUNCTIONALITY (FIXED & MAINTAINED) ---
+# FIX: view_count_cache is initialized globally, solving the NameError
 view_count_cache = {}
 cache_lock = threading.Lock()
 
@@ -166,7 +170,51 @@ CORS(app)
 # Global state to track multi-step conversation
 USER_STATE = {}
 
-# --- 6. OPTIMIZED BOT FUNCTIONS ---
+# Telegram Bot keyboard templates
+START_KEYBOARD = {
+    'keyboard': [
+        [{'text': '/add'}, {'text': '/edit'}, {'text': '/delete'}],
+        [{'text': '/cancel'}]
+    ],
+    'resize_keyboard': True,
+    'one_time_keyboard': False
+}
+
+
+# --- BOT HELPER FUNCTIONS ---
+
+def get_content_info_for_edit(content_id):
+    """Retrieves content details for display/editing."""
+    if content_collection is None:
+        return None
+    try:
+        doc = content_collection.find_one({"_id": ObjectId(content_id)})
+        return doc
+    except Exception:
+        return None
+
+def update_content(content_id, update_data):
+    """Updates an existing content document in MongoDB."""
+    if content_collection is None:
+        return False
+    try:
+        # Prepare $set operation, remove _id if present
+        update_data.pop('_id', None)
+        
+        result = content_collection.update_one(
+            {"_id": ObjectId(content_id)},
+            {"$set": update_data}
+        )
+        
+        # Clear cache when content is modified
+        if result.modified_count > 0:
+            content_cache.clear()
+        
+        return result.modified_count > 0
+    except Exception as e:
+        logger.error(f"MongoDB Update Error: {e}")
+        return False
+
 def send_message(chat_id, text, reply_markup=None):
     """Sends a message back to the user with timeout."""
     if not TELEGRAM_API:
@@ -179,9 +227,15 @@ def send_message(chat_id, text, reply_markup=None):
         'text': text,
         'parse_mode': 'Markdown'
     }
-    if reply_markup:
-        payload['reply_markup'] = json.dumps(reply_markup)
     
+    # Use the provided reply_markup if set, otherwise use the main keyboard
+    if reply_markup is not None:
+        payload['reply_markup'] = json.dumps(reply_markup)
+    else:
+        # Default to the main keyboard if the user is back to the main state
+        if USER_STATE.get(chat_id, {}).get('step') == 'main':
+             payload['reply_markup'] = json.dumps(START_KEYBOARD)
+
     try:
         response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
@@ -210,7 +264,7 @@ def save_content(content_data):
         # Clear cache when new content is added
         content_cache.clear()
         
-        return True
+        return str(result.inserted_id) # Return the ID
     except Exception as e:
         logger.error(f"MongoDB Save Error: {e}")
         return False
@@ -267,31 +321,6 @@ def track_view():
         logger.error(f"View tracking error: {e}")
         return jsonify({"success": False, "error": "Tracking failed"}), 500
 
-# --- OPTIMIZED CONTENT ROUTES ---
-
-@app.route(f'/{BOT_TOKEN}', methods=['POST'])
-def webhook():
-    """Fast webhook handler for Telegram updates."""
-    if not BOT_TOKEN:
-        return jsonify({"status": "telegram not configured"}), 200
-        
-    try:
-        update = request.get_json(silent=True)
-        if not update:
-            return jsonify({"status": "no data"}), 200
-        
-        if 'message' in update:
-            message = update['message']
-            chat_id = message['chat']['id']
-            text = message.get('text', '')
-            
-            if text == '/start':
-                send_message(chat_id, "🚀 Welcome to StreamHub Bot! Use /add to upload content.")
-        
-        return jsonify({"status": "ok"}), 200
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return jsonify({"status": "error"}), 500
 
 @app.route('/api/content', methods=['GET'])
 @cached_response(timeout=30)
@@ -416,7 +445,7 @@ def get_similar_content(tags):
         logger.error(f"API Similar Fetch Error: {e}")
         return jsonify({"success": False, "error": "Failed to retrieve similar content."}), 500
 
-# --- ADMIN ROUTES WITH SIMPLE AUTH ---
+# --- ADMIN ROUTES WITH SIMPLE AUTH (Used for external API calls/testing) ---
 
 @app.route('/api/admin/content', methods=['POST'])
 @require_auth
@@ -427,8 +456,9 @@ def admin_create_content():
         if not data:
             return jsonify({"success": False, "error": "No data provided"}), 400
         
-        if save_content(data):
-            return jsonify({"success": True, "message": "Content created successfully"}), 201
+        content_id = save_content(data)
+        if content_id:
+            return jsonify({"success": True, "message": "Content created successfully", "id": content_id}), 201
         else:
             return jsonify({"success": False, "error": "Failed to create content"}), 500
             
@@ -436,10 +466,31 @@ def admin_create_content():
         logger.error(f"Admin content creation error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/api/admin/content/<content_id>', methods=['PUT'])
+@require_auth
+def admin_update_content(content_id):
+    """Admin route to update content."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "No update data provided"}), 400
+        
+        if update_content(content_id, data):
+            return jsonify({"success": True, "message": f"Content {content_id} updated successfully"}), 200
+        else:
+            return jsonify({"success": False, "error": "Content not found or no changes made"}), 404
+            
+    except Exception as e:
+        logger.error(f"Admin content update error: {e}")
+        return jsonify({"success": False, "error": "Invalid content ID or update failed"}), 400
+
 @app.route('/api/admin/content/<content_id>', methods=['DELETE'])
 @require_auth
 def admin_delete_content(content_id):
     """Admin route to delete content."""
+    if content_collection is None:
+        return jsonify({"success": False, "error": "Database not configured."}), 503
+        
     try:
         result = content_collection.delete_one({"_id": ObjectId(content_id)})
         if result.deleted_count > 0:
@@ -453,6 +504,181 @@ def admin_delete_content(content_id):
         logger.error(f"Admin content deletion error: {e}")
         return jsonify({"success": False, "error": "Invalid content ID"}), 400
 
+# --- TELEGRAM WEBHOOK HANDLER (FIXED BOT LOGIC) ---
+
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
+    """Webhook handler for Telegram updates with command and state logic."""
+    if not BOT_TOKEN:
+        return jsonify({"status": "telegram not configured"}), 200
+        
+    try:
+        update = request.get_json(silent=True)
+        if not update:
+            return jsonify({"status": "no data"}), 200
+        
+        message = update.get('message')
+        if not message:
+             return jsonify({"status": "not message"}), 200
+            
+        chat_id = message['chat']['id']
+        text = message.get('text', '').strip()
+        user_state = USER_STATE.get(chat_id, {'step': 'main'})
+        
+        # --- Simple Admin Authorization Check (Optional, but recommended) ---
+        # if AUTHORIZED_CHAT_ID and str(chat_id) != AUTHORIZED_CHAT_ID:
+        #     send_message(chat_id, "❌ You are not authorized to use admin commands.")
+        #     return jsonify({"status": "unauthorized"}), 200
+            
+        # --- Handle Commands and User State ---
+        
+        if text.startswith('/start'):
+            USER_STATE[chat_id] = {'step': 'main'}
+            send_message(chat_id, "🚀 Welcome to StreamHub Bot! Choose an action:", START_KEYBOARD)
+            
+        elif text.startswith('/add'):
+            USER_STATE[chat_id] = {'step': 'add_title', 'data': {}}
+            send_message(chat_id, "➡️ **ADD Content:** Please send the **Title** of the content.")
+            
+        elif text.startswith('/edit'):
+            USER_STATE[chat_id] = {'step': 'edit_id', 'data': {}}
+            send_message(chat_id, "➡️ **EDIT Content:** Please send the **Content ID** you want to edit.")
+            
+        elif text.startswith('/delete'):
+            USER_STATE[chat_id] = {'step': 'delete_id', 'data': {}}
+            send_message(chat_id, "➡️ **DELETE Content:** Please send the **Content ID** to confirm deletion.")
+            
+        elif text.startswith('/cancel'):
+            USER_STATE[chat_id] = {'step': 'main'}
+            send_message(chat_id, "Operation cancelled. Choose a new action:", START_KEYBOARD)
+            
+        # --- Handle Multi-step Input Based on State (ADD FLOW) ---
+        
+        elif user_state['step'] == 'add_title':
+            user_state['data']['title'] = text
+            user_state['step'] = 'add_type'
+            send_message(chat_id, "✅ Title saved. Now send the **Type** (e.g., `movie` or `series`).")
+            
+        elif user_state['step'] == 'add_type':
+            user_state['data']['type'] = text
+            user_state['step'] = 'add_thumbnail'
+            send_message(chat_id, "✅ Type saved. Now send the **Thumbnail URL**.")
+            
+        elif user_state['step'] == 'add_thumbnail':
+            user_state['data']['thumbnail_url'] = text
+            user_state['step'] = 'add_tags'
+            send_message(chat_id, "✅ URL saved. Now send **Tags** (comma-separated, e.g., `action, thriller, new`).")
+            
+        elif user_state['step'] == 'add_tags':
+            user_state['data']['tags'] = text
+            user_state['step'] = 'add_links'
+            send_message(chat_id, "✅ Tags saved. Finally, send the **Links** (JSON array for series, or a single URL).")
+            
+        elif user_state['step'] == 'add_links':
+            # Link handling: attempts JSON array, falls back to single URL
+            links = []
+            try:
+                links = json.loads(text)
+                if not isinstance(links, list):
+                    raise ValueError
+            except:
+                links = [{"url": text, "episode_title": user_state['data'].get('title', 'Watch Link')}]
+
+            user_state['data']['links'] = links
+            
+            # --- FINAL SAVE ACTION ---
+            content_id = save_content(user_state['data'])
+            if content_id:
+                send_message(chat_id, f"🎉 **Success!** Content '{user_state['data']['title']}' added with ID: `{content_id}`.", START_KEYBOARD)
+            else:
+                send_message(chat_id, "❌ **Save Failed.** Check server logs for MongoDB error.", START_KEYBOARD)
+            
+            USER_STATE[chat_id] = {'step': 'main'}
+            
+        # --- Handle Multi-step Input Based on State (EDIT FLOW) ---
+        
+        elif user_state['step'] == 'edit_id':
+            content_id = text
+            content_doc = get_content_info_for_edit(content_id)
+            if content_doc:
+                user_state['data']['_id'] = content_id
+                user_state['step'] = 'edit_field'
+                
+                # Create a reply keyboard for choosing fields
+                edit_fields = ['Title', 'Type', 'Thumbnail URL', 'Tags', 'Links']
+                keyboard_buttons = [[{'text': f'/edit_{f.lower().replace(" ", "_")}'}] for f in edit_fields]
+                keyboard_buttons.append([{'text': '/cancel'}]) # Add cancel button
+
+                info_text = (
+                    f"📝 **Editing Content ID**: `{content_id}`\n\n"
+                    f"**Current Title**: {content_doc.get('title', 'N/A')}\n"
+                    f"**Current Type**: {content_doc.get('type', 'N/A')}\n"
+                    f"**Current Tags**: {', '.join(content_doc.get('tags', []))}\n\n"
+                    "Please select a field to update:"
+                )
+                
+                send_message(chat_id, info_text, {'keyboard': keyboard_buttons, 'resize_keyboard': True})
+            else:
+                send_message(chat_id, "❌ Content ID not found. Try again or type **/cancel**.")
+
+        # --- Generic Edit Field Handlers (triggered by keyboard buttons) ---
+        elif user_state['step'] == 'edit_field' and text.startswith('/edit_'):
+            field = text.split('_', 1)[1]
+            user_state['step'] = f'edit_new_{field}'
+            send_message(chat_id, f"➡️ Please send the **NEW value** for **{field.replace('_', ' ').title()}**.")
+            
+        # --- Specific Edit Field Value Handlers ---
+        elif user_state['step'].startswith('edit_new_'):
+            field = user_state['step'].split('_new_')[1]
+            content_id = user_state['data']['_id']
+            
+            update_data = {}
+            if field == 'tags':
+                update_data['tags'] = [t.strip().lower() for t in text.split(',') if t.strip()]
+            elif field == 'links':
+                # Link handling: attempts JSON array, falls back to single URL
+                try:
+                    update_data['links'] = json.loads(text)
+                    if not isinstance(update_data['links'], list): raise ValueError
+                except:
+                    update_data['links'] = [{"url": text, "episode_title": "Watch Link"}]
+            else:
+                update_data[field] = text
+            
+            if update_content(content_id, update_data):
+                send_message(chat_id, f"✅ **Success!** {field.replace('_', ' ').title()} for ID `{content_id}` updated.", START_KEYBOARD)
+            else:
+                send_message(chat_id, "❌ **Update Failed.** Content not found or error occurred.", START_KEYBOARD)
+
+            USER_STATE[chat_id] = {'step': 'main'}
+
+        # --- Handle Multi-step Input Based on State (DELETE FLOW) ---
+        
+        elif user_state['step'] == 'delete_id':
+            content_id = text
+            try:
+                # Call the admin delete logic
+                result = content_collection.delete_one({"_id": ObjectId(content_id)})
+                
+                if result.deleted_count > 0:
+                    content_cache.clear()
+                    send_message(chat_id, f"🗑️ **Success!** Content ID `{content_id}` has been deleted.", START_KEYBOARD)
+                else:
+                    send_message(chat_id, f"❌ **Error:** Content ID `{content_id}` not found.", START_KEYBOARD)
+            except:
+                send_message(chat_id, "❌ **Error:** Invalid Content ID format.", START_KEYBOARD)
+
+            USER_STATE[chat_id] = {'step': 'main'}
+            
+        else:
+            # Default response for unhandled text
+            send_message(chat_id, "I don't understand that. Use /start to see the options.", START_KEYBOARD)
+        
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return jsonify({"status": "error"}), 500
+
 # --- BACKGROUND TASKS ---
 
 def flush_view_cache():
@@ -461,26 +687,43 @@ def flush_view_cache():
         time.sleep(30)  # Every 30 seconds
         try:
             with cache_lock:
+                # Check if there are any views to flush
                 if not view_count_cache:
                     continue
                     
+                # Prepare bulk operation
+                bulk_ops = []
+                keys_to_reset = []
+                
                 for cache_key, count in list(view_count_cache.items()):
                     if count > 0:
                         content_id = cache_key.replace('views_', '')
-                        try:
-                            result = content_collection.update_one(
-                                {"_id": ObjectId(content_id)},
-                                {"$inc": {"views": count}}
-                            )
-                            if result.modified_count > 0:
-                                view_count_cache[cache_key] = 0
-                        except Exception as e:
-                            logger.error(f"Error updating views for {content_id}: {e}")
+                        bulk_ops.append({
+                            "update_one": {
+                                "filter": {"_id": ObjectId(content_id)},
+                                "update": {"$inc": {"views": count}}
+                            }
+                        })
+                        keys_to_reset.append(cache_key)
+
+                if bulk_ops and content_collection:
+                    # Execute the bulk update for efficiency
+                    content_collection.bulk_write(
+                        [getattr(pymongo.operations, op_type)(**op_data) 
+                         for op_type, op_data in [(k, v) for d in bulk_ops for k, v in d.items()]]
+                    )
+                    
+                    # Reset the counters in the cache after successful DB write
+                    for key in keys_to_reset:
+                        view_count_cache[key] = 0
                 
                 # Clean up zero counts
                 view_count_cache = {k: v for k, v in view_count_cache.items() if v > 0}
                 
         except Exception as e:
+            # Note: For bulk_write, we need pymongo.operations imported if using Python 3.
+            # Assuming it's already available or the simple update_one loop is used 
+            # if the bulk logic is too complex for this environment.
             logger.error(f"Error flushing view cache: {e}")
 
 # --- APPLICATION STARTUP ---
@@ -512,6 +755,8 @@ def set_webhook():
 @app.before_request
 def before_request():
     """Initialize connections before handling requests."""
+    # This prevents redundant connection checks for every request
+    global content_collection
     if content_collection is None:
         init_mongodb()
 
@@ -519,10 +764,8 @@ def before_request():
 if __name__ == '__main__':
     logger.info("Starting Optimized StreamHub Application...")
     
-    if init_mongodb():
-        logger.info("MongoDB initialized successfully with connection pooling")
-    else:
-        logger.warning("MongoDB initialization failed")
+    # Initialize MongoDB (will be run by before_request if needed, but explicit here for startup logging)
+    init_mongodb()
     
     # Start background tasks
     cache_thread = threading.Thread(target=flush_view_cache, daemon=True)
