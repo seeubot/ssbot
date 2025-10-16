@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StreamHub - Watch Free Online</title>
+    <!-- Load Tailwind CSS CDN for modern styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for modern aesthetics and animations */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* Dark background */
+        }
+
+        .gradient-text {
+            /* Clean blue/green gradient for primary text */
+            background: linear-gradient(90deg, #3b82f6 0%, #10b981 100%); 
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .card-bg {
+            background-color: #1f2937; /* Slightly lighter card background */
+        }
+
+        .spinner {
+            border-top-color: #3b82f6;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .modal-bg {
+            /* Semi-transparent dark overlay */
+            background-color: rgba(0, 0, 0, 0.9);
+        }
+
+        .modal-content-custom {
+            background-color: #0d1117;
+            border: 1px solid #374151;
+        }
+    </style>
+</head>
+<body class="min-h-screen p-4 sm:p-8">
+    <div class="max-w-7xl mx-auto">
+        
+        <!-- Header -->
+        <header class="text-center mb-10 pt-4 sm:pt-8">
+            <h1 class="text-6xl sm:text-7xl font-extrabold mb-2 gradient-text">
+                StreamHub
+            </h1>
+            <p class="text-xl sm:text-2xl text-gray-400 font-light">
+                Premium Streams. Zero Cost.
+            </p>
+        </header>
+
+        <!-- Search Bar -->
+        <div class="flex justify-center mb-12">
+            <div class="relative w-full max-w-2xl">
+                <input 
+                    type="text" 
+                    id="search-input" 
+                    placeholder="Search for a video, series, or tag..." 
+                    oninput="handleSearch()"
+                    class="w-full py-4 pl-12 pr-6 text-lg text-white bg-gray-800 rounded-full shadow-lg focus:ring-4 focus:ring-blue-500 focus:border-blue-500 border border-gray-700 transition duration-300"
+                >
+                <svg class="absolute left-4 top-1/2 transform -translate-y-1/2 h-6 w-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+            </div>
+        </div>
+
+        <!-- Loading State -->
+        <div id="loading" class="text-center py-20 text-white transition-opacity duration-500">
+            <div class="spinner w-12 h-12 mx-auto rounded-full border-4 border-gray-700"></div>
+            <p class="mt-4 text-lg text-gray-400">Loading Content...</p>
+        </div>
+
+        <!-- Content Grid -->
+        <div id="content-grid" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
+            <!-- Content cards will be injected here -->
+        </div>
+
+        <!-- Empty State -->
+        <div id="empty-state" class="text-center text-white py-20 hidden">
+            <div class="text-7xl mb-4">🤷‍♂️</div>
+            <p class="text-2xl font-semibold mb-2">Nothing matches your search.</p>
+            <p class="text-gray-400">Try broadening your search or check the recommendations below.</p>
+        </div>
+
+        <!-- Discover More/Similar Content Section (New Location) -->
+        <section class="mt-20">
+            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-2">
+                ⚡ Discover More
+            </h2>
+            <div id="discover-more-content" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
+                <!-- Recommended content will be injected here -->
+            </div>
+            <div id="discover-loading" class="text-center py-10 text-white hidden">
+                <div class="spinner w-8 h-8 mx-auto rounded-full border-4 border-gray-700"></div>
+                <p class="mt-2 text-md text-gray-500">Finding recommendations...</p>
+            </div>
+        </section>
+    </div>
+
+    <!-- Links Selection Modal -->
+    <div id="links-modal" class="fixed inset-0 modal-bg z-50 flex items-center justify-center p-4 hidden transition duration-300 ease-out">
+        <div class="modal-content-custom rounded-xl max-w-md w-full max-h-[90vh] overflow-y-auto p-6 relative shadow-2xl transition-all duration-300">
+            <button class="close-btn absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white w-8 h-8 rounded-full text-xl leading-none transition-transform duration-300 transform hover:rotate-90" onclick="closeLinksModal()">&times;</button>
+            <h2 class="text-3xl font-bold text-blue-400 mb-2" id="links-modal-title"></h2>
+            <p class="text-gray-400 mb-6 text-sm" id="links-modal-subtitle"></p>
+            
+            <ul class="space-y-3" id="links-list">
+                <!-- Links will be injected here -->
+            </ul>
+        </div>
+    </div>
+
+    <!-- Fixed Buttons -->
+    <div class="fixed bottom-6 right-6 flex flex-col space-y-3">
+        <!-- Vercel Link Updated to new frontend URL -->
+        <a href="https://teluguxxx.vercel.app/" target="_blank" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-full shadow-2xl transition duration-300 transform hover:scale-105 flex items-center">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 mr-2" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21.68l-7.76-13.44h15.52L12 21.68zM12 2.32L4.24 15.76h15.52L12 2.32z"/></svg>
+            Visit Official
+        </a>
+        <!-- Telegram Link (Security Redirect Target) -->
+        <a href="https://t.me/+oOdTY-zbwCY3MzA1" target="_blank" class="bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-3 px-6 rounded-full shadow-2xl transition duration-300 transform hover:scale-105 flex items-center">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 mr-2" viewBox="0 0 24 24" fill="currentColor"><path d="M18.3 5.4l-14.7 6.4c-.6.3-.6.7 0 1l3.5 1.1 9.1-5.7c.4-.3.7-.1.4.2l-7.3 6.6-1.9 4.8c-.2.6-.5.7-.9.4l-3.3-2.1c-.5-.3-.4-.5 0-.7l16.1-9.5c.6-.3.6-.6 0-.9z"/></svg>
+            Join Telegram
+        </a>
+    </div>
+
+    <script>
+        // --- SECURITY/ANTI-INSPECTION LOGIC (UNCHANGED) ---
+        const TELEGRAM_URL = "https://t.me/+oOdTY-zbwCY3MzA1";
+        
+        function redirectTelegram() {
+            window.location.href = TELEGRAM_URL;
+        }
+
+        document.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            redirectTelegram();
+        });
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'F12') {
+                e.preventDefault();
+                redirectTelegram();
+            }
+            if (e.ctrlKey || e.metaKey) { 
+                const key = e.key.toLowerCase();
+                if ((e.shiftKey && (key === 'i' || key === 'j' || key === 'c')) || key === 'u') {
+                    e.preventDefault();
+                    redirectTelegram();
+                }
+            }
+        });
+
+        // --- APPLICATION LOGIC (CRITICAL CHANGE HERE) ---
+        let allContent = [];
+        
+        // !!! IMPORTANT: REPLACE THIS PLACEHOLDER WITH YOUR KOYEB/BACKEND APP URL !!!
+        // This MUST be the URL of your Python Flask/API server, NOT the Vercel URL.
+        const API_BASE_URL = 'https://confident-jemima-school1660440-5a325843.koyeb.app'; // e.g., https://my-streamhub-app.koyeb.app
+        
+        // API Endpoints now use the hardcoded base URL
+        const API_URL = API_BASE_URL + '/api/content';
+        const SIMILAR_API_URL = API_BASE_URL + '/api/content/similar/';
+        
+        const loadingElement = document.getElementById('loading');
+        const grid = document.getElementById('content-grid');
+        const emptyState = document.getElementById('empty-state');
+        const discoverGrid = document.getElementById('discover-more-content');
+        const discoverLoading = document.getElementById('discover-loading');
+
+        /**
+         * Fetches all content from the API.
+         */
+        async function fetchContent() {
+            if (API_BASE_URL === 'YOUR_KOYEB_API_URL') {
+                showEmptyState("Configuration Error", "Please update API_BASE_URL in the JavaScript with your actual backend URL.");
+                return;
+            }
+            
+            loadingElement.classList.remove('hidden');
+            try {
+                const response = await fetch(API_URL);
+                const result = await response.json();
+                
+                if (result.success && Array.isArray(result.data)) {
+                    allContent = result.data;
+                    displayContent();
+                    if (allContent.length > 0 && allContent[0].tags && allContent[0].tags.length > 0) {
+                        fetchSimilarContent(allContent[0].tags.join(','));
+                    }
+                } else {
+                    showEmptyState("No content available yet.", "Use the Telegram bot to add your first video or series!");
+                }
+            } catch (error) {
+                console.error('Error fetching content:', error);
+                showEmptyState("Failed to load content.", "Check your API_BASE_URL configuration or backend status.");
+            } finally {
+                loadingElement.classList.add('hidden');
+            }
+        }
+
+        /**
+         * Renders content cards in a specified container.
+         */
+        function renderContentCards(contentArray, container) {
+            container.innerHTML = contentArray.map(item => {
+                const typeClass = item.type === 'Video' 
+                    ? 'bg-red-600' 
+                    : 'bg-green-500';
+                
+                const fallbackImage = 'https://placehold.co/280x400/1f2937/d1d5db?text=' + encodeURIComponent(item.title || 'No Title');
+                const linksText = `${item.links.length} ${item.links.length === 1 ? 'Link' : 'Links'}`;
+
+                return `
+                    <div class="content-card card-bg rounded-xl shadow-lg hover:shadow-2xl transform hover:-translate-y-1 transition duration-300 cursor-pointer group border border-gray-700 overflow-hidden" onclick="handleCardClick('${item._id}', '${item.type}')">
+                        <div class="relative">
+                            <img class="w-full h-64 object-cover transition-opacity duration-300 group-hover:opacity-80" 
+                                 src="${item.thumbnail_url}" 
+                                 alt="${item.title}"
+                                 onerror="this.onerror=null;this.src='${fallbackImage}';">
+                            
+                            <span class="absolute bottom-2 left-2 px-3 py-1 text-xs font-semibold text-white rounded-full ${typeClass} shadow-md">
+                                ${item.type}
+                            </span>
+                        </div>
+                        <div class="p-4">
+                            <h3 class="text-lg font-bold text-white mb-1 truncate">${item.title}</h3>
+                            <p class="text-gray-400 text-sm mb-3">
+                                ${linksText}
+                            </p>
+                            <button class="w-full py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition duration-300 shadow-md">
+                                Watch Stream
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+
+        /**
+         * Handles the click action on a content card based on content type.
+         */
+        function handleCardClick(contentId, contentType) {
+            const content = allContent.find(item => item._id === contentId);
+            if (!content || content.links.length === 0) {
+                console.error("No streaming links found for this content.");
+                return;
+            }
+
+            if (contentType === 'Video' && content.links.length === 1) {
+                // Direct navigation for single-link content (Video)
+                window.location.href = content.links[0].url;
+            } else {
+                // Open selection modal for multi-link content (Series)
+                openLinksModal(content);
+            }
+        }
+
+
+        /**
+         * Filters content based on the search input and renders the main grid.
+         */
+        function displayContent() {
+            const searchTerm = document.getElementById('search-input').value.toLowerCase().trim();
+            
+            const filteredContent = allContent.filter(item => {
+                const titleMatch = item.title && item.title.toLowerCase().includes(searchTerm);
+                const tagMatch = item.tags && item.tags.some(tag => tag.includes(searchTerm));
+                return titleMatch || tagMatch;
+            });
+
+            if (filteredContent.length === 0) {
+                renderContentCards([], grid);
+                emptyState.classList.remove('hidden');
+                return;
+            }
+
+            emptyState.classList.add('hidden');
+            renderContentCards(filteredContent, grid);
+        }
+
+        let searchTimeout;
+        function handleSearch() {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                displayContent();
+            }, 300); 
+        }
+
+        function showEmptyState(title, subtitle) {
+            grid.innerHTML = '';
+            document.getElementById('empty-state').querySelector('p:nth-child(2)').textContent = title;
+            document.getElementById('empty-state').querySelector('p:nth-child(3)').textContent = subtitle;
+            emptyState.classList.remove('hidden');
+        }
+
+
+        /**
+         * Opens the Links Modal for selection.
+         */
+        function openLinksModal(content) {
+            document.getElementById('links-modal-title').textContent = content.title;
+            document.getElementById('links-modal-subtitle').textContent = `Select an episode or stream:`;
+            
+            const linksList = document.getElementById('links-list');
+            
+            linksList.innerHTML = content.links.map(link => `
+                <li class="link-item">
+                    <!-- Navigates directly to the stream URL -->
+                    <button onclick="window.location.href='${link.url}'" 
+                            class="block w-full py-3 px-4 bg-gray-800 text-white font-medium rounded-lg hover:bg-green-600 transition duration-300 text-left shadow-md">
+                        <span class="text-blue-400 font-bold">${link.episode_title}</span> 
+                        <!-- Uses Link Name as the Video Title -->
+                    </button>
+                </li>
+            `).join('');
+
+            document.getElementById('links-modal').classList.remove('hidden');
+            document.getElementById('links-modal').classList.add('flex');
+        }
+
+        /**
+         * Closes the Links Modal.
+         */
+        function closeLinksModal() {
+            document.getElementById('links-modal').classList.add('hidden');
+            document.getElementById('links-modal').classList.remove('flex');
+        }
+        
+        /**
+         * Fetches and displays similar content based on tags.
+         */
+        async function fetchSimilarContent(tagsString) {
+            const tags = tagsString.split(',').map(t => t.trim()).filter(t => t.length > 0);
+            if (tags.length === 0) {
+                 discoverGrid.innerHTML = '<p class="text-gray-500 col-span-5 text-center">No relevant tags for discovery.</p>';
+                 return;
+            }
+
+            discoverLoading.classList.remove('hidden');
+            discoverGrid.innerHTML = '';
+            
+            try {
+                // Fetch up to 10 similar items
+                const response = await fetch(SIMILAR_API_URL + tags.join(','));
+                const result = await response.json();
+
+                if (result.success && Array.isArray(result.data) && result.data.length > 0) {
+                    // Show top 5 recommendations
+                    const uniqueContent = result.data.slice(0, 5); 
+                    renderContentCards(uniqueContent, discoverGrid);
+                } else {
+                    discoverGrid.innerHTML = '<p class="text-gray-500 col-span-5 text-center">No similar items found for these tags.</p>';
+                }
+
+            } catch (error) {
+                console.error('Error fetching similar content:', error);
+                discoverGrid.innerHTML = '<p class="text-red-500 col-span-5 text-center">Failed to load recommendations.</p>';
+            } finally {
+                discoverLoading.classList.add('hidden');
+            }
+        }
+
+
+        // Universal Escape key listener for the modal
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                if (!document.getElementById('links-modal').classList.contains('hidden')) {
+                    closeLinksModal();
+                }
+            }
+        });
+        
+        // Close modal on outside click
+        document.getElementById('links-modal').addEventListener('click', (e) => {
+            if (e.target.id === 'links-modal') closeLinksModal();
+        });
+
+        // Load content on page load
+        fetchContent();
+    </script>
+</body>
+</html>
