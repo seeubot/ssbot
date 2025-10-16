@@ -12,10 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application code
 COPY app.py .
 
-# Expose the default port for Koyeb (8000, though auto-detected)
+# Expose the default port for Koyeb (8000)
 EXPOSE 8000
 
-# Command to run the application using gunicorn
-# 'app:app' refers to: 'app.py' module : 'app' Flask instance name
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
-
+# Command to run the application using gunicorn. 
+# Explicitly setting workers/threads prevents unexpected shutdown (exit code 0).
+CMD ["gunicorn", "--workers", "2", "--threads", "4", "--bind", "0.0.0.0:8000", "app:app"]
