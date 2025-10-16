@@ -1,0 +1,16 @@
+name: telegram-content-bot
+services:
+  - name: app
+    ports:
+      - port: 3000
+        protocol: http
+    env:
+      - name: TELEGRAM_BOT_TOKEN
+        secret: true
+      - name: MONGODB_URI
+        secret: true
+      - name: PORT
+        value: "3000"
+    routes:
+      - path: /
+        port: 3000
