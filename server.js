@@ -1,360 +1,273 @@
-// server.js
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const { Telegraf } = require('telegraf');
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
+import os
+import json
+import requests
+from flask import Flask, request, jsonify
+from pymongo import MongoClient
+from datetime import datetime
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-app.use('/thumbnails', express.static('thumbnails'));
+# --- 1. MONGODB SETUP ---
+try:
+    MONGODB_URI = os.environ.get("MONGODB_URI")
+    if not MONGODB_URI:
+        raise ValueError("MONGODB_URI environment variable is not set.")
 
-// Ensure thumbnails directory exists
-if (!fs.existsSync('thumbnails')) {
-    fs.mkdirSync('thumbnails');
-}
-
-// MongoDB Models
-const ContentSchema = new mongoose.Schema({
-    type: { type: String, enum: ['movie', 'webseries'], required: true },
-    title: { type: String, required: true },
-    thumbnail: { type: String, required: true },
-    streamingLinks: [String],
-    episodes: [{
-        episodeNumber: Number,
-        title: String,
-        streamingLink: String
-    }],
-    createdAt: { type: Date, default: Date.now }
-});
-
-const Content = mongoose.model('Content', ContentSchema);
-
-// Telegram Bot
-const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-
-// Store user states for conversation flow
-const userStates = new Map();
-
-// Download thumbnail from Telegram
-async function downloadThumbnail(fileUrl, filename) {
-    try {
-        const response = await axios({
-            method: 'GET',
-            url: fileUrl,
-            responseType: 'stream',
-        });
-
-        const filePath = path.join('thumbnails', filename);
-        const writer = fs.createWriteStream(filePath);
-        
-        response.data.pipe(writer);
-        
-        return new Promise((resolve, reject) => {
-            writer.on('finish', () => resolve(`/thumbnails/${filename}`));
-            writer.on('error', reject);
-        });
-    } catch (error) {
-        throw new Error('Failed to download thumbnail');
-    }
-}
-
-// Bot commands and handlers
-bot.start((ctx) => {
-    const keyboard = {
-        reply_markup: {
-            keyboard: [
-                ['🎬 Add Movie', '📺 Add Web Series'],
-                ['📋 View Content', '✏️ Edit Content']
-            ],
-            resize_keyboard: true,
-            one_time_keyboard: false
-        }
-    };
-    ctx.reply('Welcome to Content Manager Bot! Choose an option:', keyboard);
-});
-
-bot.hears('🎬 Add Movie', (ctx) => {
-    userStates.set(ctx.from.id, { 
-        type: 'movie', 
-        step: 'title',
-        streamingLinks: []
-    });
-    ctx.reply('Please send the movie title:');
-});
-
-bot.hears('📺 Add Web Series', (ctx) => {
-    userStates.set(ctx.from.id, { 
-        type: 'webseries', 
-        step: 'title',
-        episodes: []
-    });
-    ctx.reply('Please send the web series title:');
-});
-
-bot.hears('📋 View Content', async (ctx) => {
-    try {
-        const content = await Content.find().sort({ createdAt: -1 }).limit(10);
-        if (content.length === 0) {
-            ctx.reply('No content available yet.');
-            return;
-        }
-
-        let message = '📋 Recent Content:\n\n';
-        content.forEach((item, index) => {
-            message += `${index + 1}. ${item.title} (${item.type})\n`;
-            if (item.type === 'webseries') {
-                message += `   Episodes: ${item.episodes.length}\n`;
-            }
-            message += '\n';
-        });
-
-        ctx.reply(message);
-    } catch (error) {
-        ctx.reply('Error fetching content.');
-    }
-});
-
-bot.hears('✏️ Edit Content', async (ctx) => {
-    try {
-        const content = await Content.find().sort({ createdAt: -1 }).limit(5);
-        if (content.length === 0) {
-            ctx.reply('No content available to edit.');
-            return;
-        }
-
-        const keyboard = {
-            inline_keyboard: content.map(item => [
-                { 
-                    text: `${item.title} (${item.type})`, 
-                    callback_data: `edit_${item._id}` 
-                }
-            ])
-        };
-
-        ctx.reply('Select content to edit:', { reply_markup: keyboard });
-    } catch (error) {
-        ctx.reply('Error fetching content for editing.');
-    }
-});
-
-bot.on('message', async (ctx) => {
-    const userId = ctx.from.id;
-    const state = userStates.get(userId);
-    const message = ctx.message;
-
-    if (!state) return;
-
-    switch (state.step) {
-        case 'title':
-            if (message.text) {
-                userStates.set(userId, { 
-                    ...state, 
-                    title: message.text, 
-                    step: 'thumbnail' 
-                });
-                ctx.reply('Great! Now please send the thumbnail image:');
-            }
-            break;
-
-        case 'thumbnail':
-            if (message.photo) {
-                try {
-                    const fileId = message.photo[message.photo.length - 1].file_id;
-                    const file = await ctx.telegram.getFile(fileId);
-                    const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-                    
-                    const filename = `thumbnail_${Date.now()}${path.extname(file.file_path)}`;
-                    const thumbnailPath = await downloadThumbnail(fileUrl, filename);
-                    
-                    userStates.set(userId, { 
-                        ...state, 
-                        thumbnail: thumbnailPath,
-                        step: state.type === 'movie' ? 'movie_links' : 'episode_count'
-                    });
-
-                    if (state.type === 'movie') {
-                        ctx.reply('Thumbnail received! Now please send streaming links (one link per message). Send /done when finished:');
-                    } else {
-                        ctx.reply('Thumbnail received! How many episodes does this web series have?');
-                    }
-                } catch (error) {
-                    ctx.reply('Error downloading thumbnail. Please try again.');
-                }
-            } else {
-                ctx.reply('Please send an image for the thumbnail.');
-            }
-            break;
-
-        case 'movie_links':
-            if (message.text === '/done') {
-                if (state.streamingLinks.length === 0) {
-                    ctx.reply('Please add at least one streaming link before finishing.');
-                    return;
-                }
-                
-                try {
-                    const content = new Content({
-                        type: state.type,
-                        title: state.title,
-                        thumbnail: state.thumbnail,
-                        streamingLinks: state.streamingLinks
-                    });
-                    await content.save();
-                    
-                    ctx.reply('✅ Movie added successfully!');
-                    userStates.delete(userId);
-                } catch (error) {
-                    ctx.reply('Error saving movie. Please try again.');
-                }
-            } else if (message.text) {
-                const links = state.streamingLinks || [];
-                links.push(message.text);
-                userStates.set(userId, { ...state, streamingLinks: links });
-                ctx.reply(`Link added! ${links.length} link(s) so far. Send another link or /done to finish.`);
-            }
-            break;
-
-        case 'episode_count':
-            if (message.text && !isNaN(message.text)) {
-                const episodeCount = parseInt(message.text);
-                userStates.set(userId, { 
-                    ...state, 
-                    episodeCount: episodeCount,
-                    currentEpisode: 1,
-                    step: 'episode_title'
-                });
-                ctx.reply(`Starting with episode 1. Please send the title for episode 1:`);
-            } else {
-                ctx.reply('Please send a valid number for episode count.');
-            }
-            break;
-
-        case 'episode_title':
-            if (message.text) {
-                userStates.set(userId, { 
-                    ...state, 
-                    currentEpisodeTitle: message.text,
-                    step: 'episode_link'
-                });
-                ctx.reply(`Now please send the streaming link for episode ${state.currentEpisode}:`);
-            }
-            break;
-
-        case 'episode_link':
-            if (message.text) {
-                const episodes = state.episodes || [];
-                episodes.push({
-                    episodeNumber: state.currentEpisode,
-                    title: state.currentEpisodeTitle,
-                    streamingLink: message.text
-                });
-
-                if (state.currentEpisode >= state.episodeCount) {
-                    // All episodes added
-                    try {
-                        const content = new Content({
-                            type: state.type,
-                            title: state.title,
-                            thumbnail: state.thumbnail,
-                            episodes: episodes
-                        });
-                        await content.save();
-                        
-                        ctx.reply(`✅ Web series "${state.title}" added successfully with ${episodes.length} episodes!`);
-                        userStates.delete(userId);
-                    } catch (error) {
-                        ctx.reply('Error saving web series. Please try again.');
-                    }
-                } else {
-                    // Move to next episode
-                    const nextEpisode = state.currentEpisode + 1;
-                    userStates.set(userId, { 
-                        ...state, 
-                        episodes: episodes,
-                        currentEpisode: nextEpisode,
-                        step: 'episode_title'
-                    });
-                    ctx.reply(`Now for episode ${nextEpisode}. Please send the title:`);
-                }
-            } else {
-                ctx.reply('Please send a valid streaming link.');
-            }
-            break;
-    }
-});
-
-// Edit content callback
-bot.on('callback_query', async (ctx) => {
-    const data = ctx.callbackQuery.data;
+    # Initialize MongoDB Client
+    client = MongoClient(MONGODB_URI)
     
-    if (data.startsWith('edit_')) {
-        const contentId = data.replace('edit_', '');
-        
-        try {
-            const content = await Content.findById(contentId);
-            if (!content) {
-                ctx.reply('Content not found.');
-                return;
-            }
+    # Define Database and Collection
+    # Note: Using 'movie' as the database name based on the connection string
+    db_name = 'movie' 
+    collection_name = 'content_items'
+    db = client[db_name]
+    content_collection = db[collection_name]
+    
+    # Test connection by listing collections
+    print(f"MongoDB connected. Database: {db_name}. Collections: {db.list_collection_names()}")
+except Exception as e:
+    print(f"FATAL: Error initializing MongoDB: {e}")
+    client = None
+    db = None
+    content_collection = None
 
-            const keyboard = {
-                inline_keyboard: [
-                    [{ text: '✏️ Edit Title', callback_data: `edit_title_${contentId}` }],
-                    [{ text: '🖼️ Edit Thumbnail', callback_data: `edit_thumbnail_${contentId}` }],
-                    content.type === 'movie' ? 
-                        [{ text: '🔗 Edit Streaming Links', callback_data: `edit_links_${contentId}` }] :
-                        [{ text: '📺 Edit Episodes', callback_data: `edit_episodes_${contentId}` }]
-                ]
-            };
+# --- 2. TELEGRAM AND FLASK SETUP ---
 
-            ctx.reply(`Editing: ${content.title}\nWhat would you like to edit?`, {
-                reply_markup: keyboard
-            });
-        } catch (error) {
-            ctx.reply('Error loading content for editing.');
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+APP_URL = os.environ.get("APP_URL") # Used to inform the frontend where to fetch data
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is not set.")
+if not APP_URL:
+    print("WARNING: APP_URL environment variable is not set. Frontend fetching may fail.")
+
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
+
+app = Flask(__name__)
+
+# Global state to track multi-step conversation for each user/admin
+USER_STATE = {} 
+
+# FSM States
+STATE_START = 'START'
+STATE_WAITING_FOR_TYPE = 'WAITING_FOR_TYPE'
+STATE_WAITING_FOR_THUMBNAIL = 'WAITING_FOR_THUMBNAIL'
+STATE_WAITING_FOR_TITLE = 'WAITING_FOR_TITLE'
+STATE_WAITING_FOR_LINK_TITLE = 'WAITING_FOR_LINK_TITLE'
+STATE_WAITING_FOR_LINK_URL = 'WAITING_FOR_LINK_URL'
+STATE_CONFIRM_LINK = 'CONFIRM_LINK'
+
+# --- 3. CORE BOT FUNCTIONS ---
+
+def send_message(chat_id, text, reply_markup=None):
+    """Sends a message back to the user."""
+    url = TELEGRAM_API + "sendMessage"
+    payload = {
+        'chat_id': chat_id,
+        'text': text,
+        'parse_mode': 'Markdown'
+    }
+    if reply_markup:
+        payload['reply_markup'] = json.dumps(reply_markup)
+    
+    try:
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"Error sending message: {e}")
+
+def save_content(content_data):
+    """Saves the complete content document to MongoDB."""
+    if content_collection is None:
+        return False
+
+    try:
+        document = {
+            "title": content_data.get('title'),
+            "type": content_data.get('type'),
+            "thumbnail_url": content_data.get('thumbnail_url'),
+            "links": content_data.get('links', []),
+            "created_at": datetime.utcnow() # Use UTC datetime for creation time
         }
+        
+        # Insert document into the 'content_items' collection
+        content_collection.insert_one(document)
+        return True
+    except Exception as e:
+        print(f"MongoDB Save Error: {e}")
+        return False
+
+# --- 4. CONVERSATION HANDLERS (Same logic as before) ---
+
+def start_new_upload(chat_id):
+    """Starts the content upload process, asking for type."""
+    USER_STATE[chat_id] = {'state': STATE_WAITING_FOR_TYPE, 'content_data': {'links': []}}
+    
+    keyboard = {
+        'inline_keyboard': [
+            [{'text': '🎬 Movie', 'callback_data': 'type_Movie'}],
+            [{'text': '📺 Web Series', 'callback_data': 'type_Series'}]
+        ]
     }
-});
+    send_message(
+        chat_id, 
+        "*Welcome to the Content Upload Bot!*\\n\\nPlease select the type of content you want to upload:",
+        reply_markup=keyboard
+    )
 
-// API Routes
-app.get('/api/content', async (req, res) => {
-    try {
-        const content = await Content.find().sort({ createdAt: -1 });
-        res.json(content);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+def ask_for_title(chat_id):
+    """Prompts for the content title."""
+    USER_STATE[chat_id]['state'] = STATE_WAITING_FOR_TITLE
+    send_message(chat_id, "✅ Content Type set.\\n\\nNow, what is the *Title* of the Movie/Series?")
 
-app.get('/api/content/:id', async (req, res) => {
-    try {
-        const content = await Content.findById(req.params.id);
-        res.json(content);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+def ask_for_thumbnail(chat_id):
+    """Prompts for the thumbnail URL."""
+    USER_STATE[chat_id]['state'] = STATE_WAITING_FOR_THUMBNAIL
+    send_message(chat_id, "✅ Title set.\\n\\nNext, please send the *public URL* for the Content Thumbnail Image:")
 
-const PORT = process.env.PORT || 3000;
+def ask_for_link_title(chat_id):
+    """Prompts for the link/episode title."""
+    content_type = USER_STATE[chat_id]['content_data']['type']
+    
+    if content_type == 'Movie':
+        prompt = "Enter the name for the streaming link (e.g., 'Full Movie' or '480p Stream')."
+    else: # Series
+        prompt = "Enter the name for the *next episode* (e.g., 'S01E01 Pilot' or 'Episode 3')."
+    
+    USER_STATE[chat_id]['state'] = STATE_WAITING_FOR_LINK_TITLE
+    send_message(chat_id, f"✅ Thumbnail URL set.\\n\\n{prompt}")
 
-// Start server
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/telegram-bot')
-    .then(() => {
-        console.log('Connected to MongoDB');
-        app.listen(PORT, () => {
-            console.log(`Server running on port ${PORT}`);
-            bot.launch();
-            console.log('Telegram bot started');
-        });
-    })
-    .catch(err => {
-        console.error('MongoDB connection error:', err);
-    });
+def finish_upload(chat_id):
+    """Completes the upload and saves to MongoDB."""
+    content_data = USER_STATE[chat_id]['content_data']
+    
+    if not content_data.get('title') or not content_data.get('links'):
+        send_message(chat_id, "❌ Error: Missing title or streaming links. Please start over with /start.")
+        USER_STATE[chat_id]['state'] = STATE_START
+        return
 
-// Enable graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+    if save_content(content_data):
+        send_message(chat_id, 
+            f"🎉 *Success!*\\n\\nContent '{content_data['title']}' saved to MongoDB.\\nIt should now be visible on your frontend page.")
+        USER_STATE[chat_id]['state'] = STATE_START
+        USER_STATE[chat_id]['content_data'] = {'links': []}
+    else:
+        send_message(chat_id, "❌ Error: Could not save to MongoDB. Check server logs.")
+
+# Helper function to handle text messages
+def handle_text_message(chat_id, text):
+    state = USER_STATE.get(chat_id, {}).get('state', STATE_START)
+    content_data = USER_STATE.get(chat_id, {}).get('content_data', {})
+
+    if text.startswith('/start'):
+        start_new_upload(chat_id)
+        return
+
+    if state == STATE_WAITING_FOR_TITLE:
+        content_data['title'] = text
+        send_message(chat_id, f"Title set: *{text}*")
+        ask_for_thumbnail(chat_id)
+
+    elif state == STATE_WAITING_FOR_THUMBNAIL:
+        if text.startswith('http'):
+            content_data['thumbnail_url'] = text
+            send_message(chat_id, "Thumbnail URL received.")
+            ask_for_link_title(chat_id)
+        else:
+            send_message(chat_id, "That doesn't look like a URL. Please send a *public URL* starting with `http` or `https`.")
+
+    elif state == STATE_WAITING_FOR_LINK_TITLE:
+        content_data['current_link_title'] = text
+        USER_STATE[chat_id]['state'] = STATE_WAITING_FOR_LINK_URL
+        send_message(chat_id, f"Link name set: *{text}*\\n\\nNow, send the *Streaming URL* for this link/episode:")
+
+    elif state == STATE_WAITING_FOR_LINK_URL:
+        if text.startswith('http'):
+            link_title = content_data.pop('current_link_title', 'Link')
+            content_data['links'].append({'episode_title': link_title, 'url': text})
+            
+            keyboard = {
+                'inline_keyboard': [
+                    [{'text': '➕ Add Another Link', 'callback_data': 'add_Yes'}],
+                    [{'text': '✅ Done Uploading', 'callback_data': 'add_No'}]
+                ]
+            }
+            send_message(chat_id, 
+                f"✅ Streaming URL added! Total links: {len(content_data['links'])}.\\n\\nWhat would you like to do next?",
+                reply_markup=keyboard
+            )
+            USER_STATE[chat_id]['state'] = STATE_CONFIRM_LINK
+        else:
+            send_message(chat_id, "That doesn't look like a valid streaming URL. Please send a URL starting with `http` or `https`.")
+
+    elif state == STATE_START:
+        send_message(chat_id, "Please use the /start command to begin a new content upload.")
+
+    else:
+        send_message(chat_id, "I'm waiting for a specific piece of information. Please follow the current prompt or type /start to reset.")
+
+# Helper function to handle callback queries
+def handle_callback_query(chat_id, data):
+    state = USER_STATE.get(chat_id, {}).get('state')
+    content_data = USER_STATE.get(chat_id, {}).get('content_data', {})
+
+    if state == STATE_WAITING_FOR_TYPE and data.startswith('type_'):
+        content_type = data.split('_')[1]
+        content_data['type'] = content_type
+        send_message(chat_id, f"You selected: *{content_type}*")
+        ask_for_title(chat_id)
+        
+    elif state == STATE_CONFIRM_LINK and data.startswith('add_'):
+        action = data.split('_')[1]
+        if action == 'Yes':
+            ask_for_link_title(chat_id)
+        elif action == 'No':
+            finish_upload(chat_id)
+
+# --- 5. KOYEB ROUTES ---
+
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
+    """Main webhook handler for Telegram updates."""
+    update = request.json
+    
+    if 'message' in update:
+        message = update['message']
+        chat_id = message['chat']['id']
+        text = message.get('text', '')
+        handle_text_message(chat_id, text)
+        
+    elif 'callback_query' in update:
+        query = update['callback_query']
+        chat_id = query['message']['chat']['id']
+        data = query['data']
+        handle_callback_query(chat_id, data)
+        
+    return 'OK'
+
+@app.route('/api/content', methods=['GET'])
+def get_content():
+    """REST API endpoint for the frontend to fetch content from MongoDB."""
+    if content_collection is None:
+        return jsonify({"error": "Database not configured."}), 503
+
+    try:
+        # Fetch all content, sorted by 'created_at' descending
+        content_cursor = content_collection.find().sort("created_at", -1)
+        
+        content_list = []
+        for doc in content_cursor:
+            # Convert MongoDB ObjectId and datetime to string for JSON serialization
+            doc['_id'] = str(doc['_id'])
+            if 'created_at' in doc:
+                doc['created_at'] = doc['created_at'].isoformat()
+            content_list.append(doc)
+            
+        return jsonify(content_list), 200
+    except Exception as e:
+        print(f"API Fetch Error: {e}")
+        return jsonify({"error": "Failed to retrieve content."}), 500
+
+
+@app.route('/')
+def index():
+    """Koyeb health check endpoint."""
+    return f"MongoDB Bot Listener for Database '{db_name}' is running.", 200
+
