@@ -272,7 +272,7 @@ def index():
 def health():
     """Fast health check endpoint."""
     try:
-        if content_collection is not None:
+        if client is not None: # Use client to ping if content_collection might be None on startup
             client.admin.command('ping')
             return jsonify({
                 "status": "healthy", 
@@ -284,9 +284,13 @@ def health():
     
     return jsonify({"status": "unhealthy", "database": "disconnected"}), 503
 
-@app.route('/api/track-view', methods=['POST'])
+@app.route('/api/track-view', methods=['POST', 'OPTIONS'])
 def track_view():
     """Fast view count tracking with minimal processing."""
+    if request.method == 'OPTIONS':
+        # Handle CORS preflight request
+        return '', 200
+        
     try:
         data = request.get_json(silent=True) or {}
         content_id = data.get('content_id')
@@ -646,19 +650,23 @@ def webhook():
         return jsonify({"status": "error"}), 500
 
 # -------------------------------------------------------------
-# --- BACKGROUND TASKS (FIXED: Added global keyword) ---
+# --- BACKGROUND TASKS (FIXED: Explicitly checking against None) ---
 # -------------------------------------------------------------
 
 def flush_view_cache():
     """Periodically flush view count cache to database."""
-    # FIX: Explicitly declare as global to prevent Python from treating
-    # dictionary deletion/modification as a local assignment.
     global view_count_cache 
     while True:
         time.sleep(30)
         try:
             with cache_lock:
                 if not view_count_cache:
+                    continue
+                
+                # FIX: Check if content_collection is None, as required by PyMongo 
+                if content_collection is None:
+                    # If it's None, log a warning and skip the database operation this cycle
+                    logger.warning("Skipping view cache flush: MongoDB collection is not available.")
                     continue
                     
                 bulk_ops = []
@@ -676,17 +684,21 @@ def flush_view_cache():
                         )
                         keys_to_delete.append(cache_key)
 
-                if bulk_ops and content_collection:
+                # FIX: Changed `if bulk_ops and content_collection:` to explicit None check
+                if bulk_ops and content_collection is not None: 
                     content_collection.bulk_write(bulk_ops)
                     
                     # Remove the flushed keys from the global cache
                     for key in keys_to_delete:
                         if key in view_count_cache:
-                            # This is the line that required 'global'
                             del view_count_cache[key] 
                 
         except Exception as e:
-            logger.error(f"Error flushing view cache: {e}")
+            # Added check for the specific PyMongo error just in case, but the logic should fix it
+            if "Collection objects do not implement truth value testing" in str(e):
+                 logger.error(f"Error flushing view cache: Collection objects do not implement truth value testing or bool(). Please compare with None instead: collection is not None")
+            else:
+                 logger.error(f"Error flushing view cache: {e}")
 
 # -------------------------------------------------------------
 # --- APPLICATION STARTUP ---
@@ -721,6 +733,7 @@ def set_webhook():
 def before_request():
     """Initialize connections before handling requests."""
     global content_collection
+    # Check if the collection is None before trying to initialize.
     if content_collection is None:
         init_mongodb()
 
@@ -728,15 +741,3 @@ if __name__ == '__main__':
     logger.info("Starting Optimized StreamHub Application...")
     
     init_mongodb()
-    
-    # Start background tasks
-    cache_thread = threading.Thread(target=flush_view_cache, daemon=True)
-    cache_thread.start()
-    
-    if APP_URL and BOT_TOKEN:
-        set_webhook()
-    else:
-        logger.warning("APP_URL or BOT_TOKEN not set - webhook not configured")
-    
-    logger.info(f"Starting optimized Flask app on port {PORT}")
-    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
