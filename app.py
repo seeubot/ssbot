@@ -225,16 +225,8 @@ def save_content(content_data):
 def index():
     """Simple status check."""
     return jsonify({
-        "service": "StreamHub API/Bot", 
-        "status": "online", 
-        "message": "API is running. Use /api/auth/2fa-setup to enable 2FA.",
-        "api_endpoints": [
-            "/api/content", 
-            "/api/content/similar/<tags>", 
-            "/api/auth/2fa-setup",
-            "/api/auth/verify-2fa",
-            "/api/track-view"
-        ]
+        "service": "StreamHub ", 
+        "status": "online"
     }), 200
 
 @app.route('/health', methods=['GET'])
