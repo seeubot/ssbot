@@ -2,7 +2,7 @@ import os
 import json
 import requests
 from flask import Flask, request, jsonify
-from flask_cors import CORS  # Import CORS
+from flask_cors import CORS 
 from pymongo import MongoClient
 from bson import ObjectId
 from datetime import datetime
@@ -57,9 +57,6 @@ def init_mongodb():
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 APP_URL = os.environ.get("APP_URL")
 PORT = int(os.environ.get("PORT", 8000))
-# NEW: Get the Vercel URL from environment variables
-VERCEL_FRONTEND_URL = os.environ.get("VERCEL_FRONTEND_URL", "https://teluguxxx.vercel.app")
-
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is not set.")
@@ -67,23 +64,8 @@ if not BOT_TOKEN:
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
 app = Flask(__name__)
-
-# --- CORS CONFIGURATION FIX ---
-# We define the allowed origins explicitly using the VERCEL_FRONTEND_URL
-# We allow the specific Vercel URL and the Koyeb host itself for local testing.
-allowed_origins = [
-    VERCEL_FRONTEND_URL,
-    f"https://{os.environ.get('KOYEB_PUBLIC_DOMAIN')}" if os.environ.get('KOYEB_PUBLIC_DOMAIN') else None,
-    # Allow http://localhost:8000 for local development (optional)
-    "http://localhost:8000"
-]
-# Filter out None values
-allowed_origins = [url for url in allowed_origins if url]
-logger.info(f"CORS allowed origins set to: {allowed_origins}")
-
-# Initialize CORS with the explicit list of allowed origins
-CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
-# -----------------------------
+# CORS is essential since the Vercel frontend is a different domain!
+CORS(app) 
 
 # Global state to track multi-step conversation
 USER_STATE = {}
@@ -102,6 +84,7 @@ STATE_WAITING_FOR_NEW_VALUE = 'WAITING_FOR_NEW_VALUE'
 STATE_CONFIRM_DELETE = 'CONFIRM_DELETE'
 
 # --- 3. CORE BOT FUNCTIONS (CRUD) ---
+# (Helper functions like send_message, save_content, delete_content, update_content remain the same)
 def send_message(chat_id, text, reply_markup=None):
     """Sends a message back to the user."""
     url = TELEGRAM_API + "sendMessage"
@@ -170,6 +153,7 @@ def update_content(content_id, update_fields):
         return False
 
 # --- 4. CONVERSATION HANDLERS (FSM) ---
+# (FSM functions remain the same)
 
 def start_new_upload(chat_id):
     """Starts the content upload process."""
@@ -469,7 +453,7 @@ def webhook():
 def get_content():
     """REST API endpoint for the frontend to fetch all content."""
     if content_collection is None:
-        return jsonify({"success": False, "error": "Database not configured."}), 503
+        return jsonify({"error": "Database not configured."}), 503
 
     try:
         # Sort by creation date descending
@@ -498,7 +482,7 @@ def get_similar_content(tags):
     API endpoint to fetch content that shares at least one tag.
     """
     if content_collection is None:
-        return jsonify({"success": False, "error": "Database not configured."}), 503
+        return jsonify({"error": "Database not configured."}), 503
 
     # Clean and lowercase the input tags
     target_tags = [t.strip().lower() for t in tags.split(',') if t.strip()]
@@ -560,7 +544,6 @@ def set_webhook():
 @app.before_request
 def before_first_request():
     """Initialize connections before handling requests."""
-    # Only initialize if the global collection is None
     if content_collection is None:
         init_mongodb()
 
