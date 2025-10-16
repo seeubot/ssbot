@@ -1,30 +1,21 @@
-FROM python:3.11-slim
+# Use a Python base image suitable for production
+FROM python:3.10-slim
 
-# Install system dependencies for OpenCV
-RUN apt-get update && apt-get install -y \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-
+# Set the working directory inside the container
 WORKDIR /app
 
-# Copy requirements first for better caching
+# Copy the requirements file and install dependencies
+# We install gunicorn here, which runs the application in production
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
-COPY bot.py .
+# Copy the application code
+COPY app.py .
 
-# Expose port
+# Expose the default port for Koyeb (8000, though auto-detected)
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+# Command to run the application using gunicorn
+# 'app:app' refers to: 'app.py' module : 'app' Flask instance name
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
 
-# Run the bot
-CMD ["python", "-u", "bot.py"]
