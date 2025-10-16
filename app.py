@@ -2,9 +2,9 @@ import os
 import json
 import requests
 from flask import Flask, request, jsonify
-from flask_cors import CORS # Import for Cross-Origin Access
+from flask_cors import CORS 
 from pymongo import MongoClient
-from bson import ObjectId # Required for ID management
+from bson import ObjectId
 from datetime import datetime
 import logging
 
@@ -30,6 +30,7 @@ def init_mongodb():
             logger.error("MONGODB_URI environment variable is not set.")
             return False
         
+        # NOTE: Using server-side connection string which is safer
         client = MongoClient(
             MONGODB_URI,
             serverSelectionTimeoutMS=5000,
@@ -46,7 +47,7 @@ def init_mongodb():
         db = client[db_name]
         content_collection = db[collection_name]
         
-        logger.info(f"MongoDB connected. Database: {db_name}, Collections: {db.list_collection_names()}")
+        logger.info(f"MongoDB connected. Database: {db_name}")
         return True
     except Exception as e:
         logger.error(f"MongoDB initialization failed: {e}")
@@ -63,27 +64,27 @@ if not BOT_TOKEN:
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
 app = Flask(__name__)
-CORS(app) # Enable CORS for all domains
+# CORS is essential since the Vercel frontend is a different domain!
+CORS(app) 
 
 # Global state to track multi-step conversation
 USER_STATE = {}
 
-# FSM States
+# FSM States (CRUD states remain the same)
 STATE_START = 'START'
 STATE_WAITING_FOR_TYPE = 'WAITING_FOR_TYPE'
 STATE_WAITING_FOR_TITLE = 'WAITING_FOR_TITLE'
 STATE_WAITING_FOR_THUMBNAIL = 'WAITING_FOR_THUMBNAIL'
-STATE_WAITING_FOR_TAGS = 'WAITING_FOR_TAGS' # New state for similar content key
+STATE_WAITING_FOR_TAGS = 'WAITING_FOR_TAGS'
 STATE_WAITING_FOR_LINK_TITLE = 'WAITING_FOR_LINK_TITLE'
 STATE_WAITING_FOR_LINK_URL = 'WAITING_FOR_LINK_URL'
 STATE_CONFIRM_LINK = 'CONFIRM_LINK'
-
 STATE_WAITING_FOR_EDIT_FIELD = 'WAITING_FOR_EDIT_FIELD'
 STATE_WAITING_FOR_NEW_VALUE = 'WAITING_FOR_NEW_VALUE'
 STATE_CONFIRM_DELETE = 'CONFIRM_DELETE'
 
 # --- 3. CORE BOT FUNCTIONS (CRUD) ---
-
+# (Helper functions like send_message, save_content, delete_content, update_content remain the same)
 def send_message(chat_id, text, reply_markup=None):
     """Sends a message back to the user."""
     url = TELEGRAM_API + "sendMessage"
@@ -152,6 +153,7 @@ def update_content(content_id, update_fields):
         return False
 
 # --- 4. CONVERSATION HANDLERS (FSM) ---
+# (FSM functions remain the same)
 
 def start_new_upload(chat_id):
     """Starts the content upload process."""
@@ -394,401 +396,21 @@ def handle_callback_query(chat_id, data):
             send_message(chat_id, "Edit cancelled.")
             USER_STATE[chat_id]['state'] = STATE_START
 
-# --- 5. WEBHOOK SETUP ---
-# ... (set_webhook function remains unchanged)
+# --- 5. FLASK ROUTES ---
 
-# --- 6. FLASK ROUTES ---
-
-@app.route('/')
+@app.route('/', methods=['GET'])
 def index():
-    """Serve the advanced frontend page with security measures and Telegram link."""
-    # Updated HTML to support the new video player modal, similar content key, and security
-    return '''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>StreamHub - Watch Free Online</title>
-    <!-- Load Tailwind CSS CDN for modern styling -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        /* Custom styles for modern aesthetics and animations */
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
-        
-        * {
-            box-sizing: border-box;
-        }
+    """Simple status check since the frontend is now served by Vercel."""
+    return jsonify({
+        "service": "StreamHub API/Bot", 
+        "status": "online", 
+        "message": "API is running. Frontend expected at Vercel deployment.",
+        "api_endpoints": ["/api/content", "/api/content/similar/<tags>"]
+    }), 200
 
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #0d1117; /* Dark background */
-        }
-
-        .gradient-text {
-            background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-
-        .card-bg {
-            background-color: #161b22;
-        }
-
-        .spinner {
-            border-top-color: #a855f7;
-            animation: spin 1s linear infinite;
-        }
-
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-
-        .modal-bg {
-            background-color: rgba(0, 0, 0, 0.95);
-        }
-
-        .modal-content-custom {
-            background-color: #1f2937;
-        }
-    </style>
-</head>
-<body class="min-h-screen p-4 sm:p-8">
-    <div class="max-w-7xl mx-auto">
-        
-        <!-- Header -->
-        <header class="text-center mb-10 pt-4 sm:pt-8 animate-in fade-in zoom-in duration-500">
-            <h1 class="text-5xl sm:text-7xl font-extrabold mb-2 gradient-text">
-                StreamHub
-            </h1>
-            <p class="text-xl sm:text-2xl text-gray-400 font-light">
-                Watch Free Online
-            </p>
-        </header>
-
-        <!-- Search Bar -->
-        <div class="flex justify-center mb-12">
-            <div class="relative w-full max-w-2xl">
-                <input 
-                    type="text" 
-                    id="search-input" 
-                    placeholder="Search for a video or series..." 
-                    oninput="handleSearch()"
-                    class="w-full py-4 pl-12 pr-6 text-lg text-white card-bg rounded-xl shadow-2xl focus:ring-4 focus:ring-indigo-500 focus:border-indigo-500 border-2 border-transparent transition duration-300"
-                >
-                <svg class="absolute left-4 top-1/2 transform -translate-y-1/2 h-6 w-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-            </div>
-        </div>
-
-        <!-- Loading State -->
-        <div id="loading" class="text-center py-20 text-white transition-opacity duration-500">
-            <div class="spinner w-12 h-12 mx-auto rounded-full border-4 border-gray-700"></div>
-            <p class="mt-4 text-lg text-gray-400">Loading your ultimate collection...</p>
-        </div>
-
-        <!-- Content Grid -->
-        <div id="content-grid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-            <!-- Content cards will be injected here -->
-        </div>
-
-        <!-- Empty State -->
-        <div id="empty-state" class="text-center text-white py-20 hidden">
-            <div class="text-7xl mb-4">🤷‍♂️</div>
-            <p class="text-2xl font-semibold mb-2">Nothing found.</p>
-            <p class="text-gray-400">Try adjusting your search term or check back later!</p>
-        </div>
-    </div>
-
-    <!-- 1. Links Selection Modal -->
-    <div id="links-modal" class="fixed inset-0 modal-bg z-50 flex items-center justify-center p-4 hidden transition duration-300 ease-out">
-        <div class="modal-content-custom rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 relative shadow-2xl transition-all duration-300">
-            <button class="close-btn absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white w-8 h-8 rounded-full text-xl leading-none transition-transform duration-300 transform hover:rotate-90" onclick="closeLinksModal()">&times;</button>
-            <h2 class="text-3xl font-bold text-white mb-6 pr-8" id="links-modal-title"></h2>
-            <p class="text-gray-400 mb-6">Select a streaming source to begin watching:</p>
-            
-            <ul class="space-y-4" id="links-list">
-                <!-- Links will be injected here -->
-            </ul>
-        </div>
-    </div>
-
-    <!-- 2. Video Player Modal -->
-    <div id="player-modal" class="fixed inset-0 modal-bg z-50 flex items-center justify-center p-4 hidden transition duration-300 ease-out">
-        <div class="modal-content-custom rounded-2xl max-w-5xl w-full max-h-[95vh] overflow-y-auto p-6 relative shadow-2xl transition-all duration-300">
-            <button class="close-btn absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white w-8 h-8 rounded-full text-xl leading-none transition-transform duration-300 transform hover:rotate-90" onclick="closePlayerModal()">&times;</button>
-            <h2 class="text-3xl font-bold text-white mb-6 pr-8" id="player-modal-title"></h2>
-
-            <!-- Video Player -->
-            <div class="relative w-full pb-[56.25%] mb-8 rounded-lg overflow-hidden shadow-2xl">
-                <!-- Aspect Ratio Box (16:9) for responsiveness -->
-                <iframe id="video-player-iframe" 
-                        class="absolute top-0 left-0 w-full h-full" 
-                        src="" 
-                        scrolling="no" 
-                        frameborder="0" 
-                        allowfullscreen="true" 
-                        webkitallowfullscreen="true" 
-                        mozallowfullscreen="true">
-                </iframe>
-
-                <!-- Telegram Button over Player -->
-                <a href="https://t.me/+oOdTY-zbwCY3MzA1" target="_blank" class="absolute top-4 left-4 bg-blue-500 hover:bg-blue-600 text-white p-2 rounded-full shadow-lg transition duration-300 transform hover:scale-110 flex items-center">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M18.3 5.4l-14.7 6.4c-.6.3-.6.7 0 1l3.5 1.1 9.1-5.7c.4-.3.7-.1.4.2l-7.3 6.6-1.9 4.8c-.2.6-.5.7-.9.4l-3.3-2.1c-.5-.3-.4-.5 0-.7l16.1-9.5c.6-.3.6-.6 0-.9z"/></svg>
-                </a>
-            </div>
-
-            <!-- Similar Content Section -->
-            <div id="similar-content-section">
-                <h3 class="text-xl font-bold text-gray-300 mb-4">Similar Content (Tags)</h3>
-                <div id="tags-container" class="flex flex-wrap gap-2">
-                    <!-- Tags will be injected here -->
-                </div>
-            </div>
-
-        </div>
-    </div>
-
-    <!-- Join Telegram Button (Fixed/Sticky) -->
-    <a href="https://t.me/+oOdTY-zbwCY3MzA1" target="_blank" class="fixed bottom-6 right-6 bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-3 px-6 rounded-full shadow-2xl transition duration-300 transform hover:scale-105 flex items-center z-40">
-        <!-- Inline Telegram Icon (SVG) -->
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 mr-2" viewBox="0 0 24 24" fill="currentColor"><path d="M18.3 5.4l-14.7 6.4c-.6.3-.6.7 0 1l3.5 1.1 9.1-5.7c.4-.3.7-.1.4.2l-7.3 6.6-1.9 4.8c-.2.6-.5.7-.9.4l-3.3-2.1c-.5-.3-.4-.5 0-.7l16.1-9.5c.6-.3.6-.6 0-.9z"/></svg>
-        Join Telegram
-    </a>
-
-    <script>
-        // --- SECURITY/ANTI-INSPECTION LOGIC ---
-        
-        const TELEGRAM_URL = "https://t.me/+oOdTY-zbwCY3MzA1";
-        
-        function redirectTelegram() {
-            window.location.href = TELEGRAM_URL;
-        }
-
-        // 1. Disable Right-Click (Context Menu)
-        document.addEventListener('contextmenu', function(e) {
-            e.preventDefault();
-            redirectTelegram();
-        });
-
-        // 2. Disable Keyboard Shortcuts (F12, Ctrl/Cmd + Shift + I/J/C/U)
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'F12') {
-                e.preventDefault();
-                redirectTelegram();
-            }
-
-            if (e.ctrlKey || e.metaKey) { 
-                const key = e.key.toLowerCase();
-                if ((e.shiftKey && (key === 'i' || key === 'j' || key === 'c')) || key === 'u') {
-                    e.preventDefault();
-                    redirectTelegram();
-                }
-            }
-        });
-
-        // --- APPLICATION LOGIC ---
-
-        let allContent = [];
-        const API_URL = window.location.origin + '/api/content';
-
-        /**
-         * Fetches all content from the API.
-         */
-        async function fetchContent() {
-            try {
-                const response = await fetch(API_URL);
-                const result = await response.json();
-                
-                if (result.success && Array.isArray(result.data)) {
-                    allContent = result.data;
-                    displayContent();
-                } else {
-                    showEmptyState("No content available yet. Use the Telegram bot to add your first video or series!");
-                }
-            } catch (error) {
-                console.error('Error fetching content:', error);
-                showEmptyState("Failed to load content. Check your network connection or API.");
-            } finally {
-                document.getElementById('loading').classList.add('hidden');
-            }
-        }
-
-        /**
-         * Filters content based on the search input and renders the grid.
-         */
-        function displayContent() {
-            const grid = document.getElementById('content-grid');
-            const emptyState = document.getElementById('empty-state');
-            const searchTerm = document.getElementById('search-input').value.toLowerCase().trim();
-            
-            const filteredContent = allContent.filter(item => 
-                item.title && item.title.toLowerCase().includes(searchTerm)
-            );
-
-            if (filteredContent.length === 0) {
-                grid.innerHTML = '';
-                emptyState.classList.remove('hidden');
-                return;
-            }
-
-            emptyState.classList.add('hidden');
-            
-            grid.innerHTML = filteredContent.map(item => {
-                const typeClass = item.type === 'Video' 
-                    ? 'bg-red-600' 
-                    : 'bg-green-500';
-                
-                const fallbackImage = 'https://placehold.co/280x400/21262d/8b949e?text=' + encodeURIComponent(item.title || 'No Title');
-
-                return `
-                    <div class="content-card card-bg rounded-xl overflow-hidden shadow-xl hover:shadow-2xl transform hover:-translate-y-2 transition duration-300 cursor-pointer group" onclick="openLinksModal('${item._id}')">
-                        <div class="relative">
-                            <img class="w-full h-96 object-cover transition-opacity duration-300 group-hover:opacity-80" 
-                                 src="${item.thumbnail_url}" 
-                                 alt="${item.title}"
-                                 onerror="this.onerror=null;this.src='${fallbackImage}';">
-                            
-                            <span class="absolute top-3 left-3 px-3 py-1 text-sm font-semibold text-white rounded-full ${typeClass} shadow-md">
-                                ${item.type}
-                            </span>
-                        </div>
-                        <div class="p-5">
-                            <h3 class="text-xl font-bold text-white mb-2 truncate">${item.title}</h3>
-                            <p class="text-gray-400 text-sm mb-4">
-                                🔗 ${item.links.length} ${item.links.length === 1 ? 'Link' : 'Links'} Available
-                            </p>
-                            <button class="w-full py-3 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition duration-300 shadow-lg hover:shadow-xl">
-                                Watch Now
-                            </button>
-                        </div>
-                    </div>
-                `;
-            }).join('');
-        }
-
-        let searchTimeout;
-        function handleSearch() {
-            clearTimeout(searchTimeout);
-            searchTimeout = setTimeout(() => {
-                displayContent();
-            }, 300); 
-        }
-
-        function showEmptyState(message) {
-            const grid = document.getElementById('content-grid');
-            const emptyState = document.getElementById('empty-state');
-            grid.innerHTML = '';
-            const parts = message.split('.');
-            emptyState.querySelector('p:nth-child(2)').textContent = parts[0] || 'No content found.';
-            emptyState.querySelector('p:nth-child(3)').textContent = parts[1] ? parts[1].trim() : '';
-            emptyState.classList.remove('hidden');
-        }
-
-
-        /**
-         * Opens the Links Modal for selection.
-         */
-        function openLinksModal(contentId) {
-            const content = allContent.find(item => item._id === contentId);
-            if (!content) return;
-
-            document.getElementById('links-modal-title').textContent = content.title;
-            
-            const linksList = document.getElementById('links-list');
-            
-            // Store content data in the links modal element temporarily
-            document.getElementById('links-modal').dataset.contentId = contentId;
-            
-            linksList.innerHTML = content.links.map(link => `
-                <li class="link-item">
-                    <button onclick="openPlayerModal('${link.url}', '${content.title}', '${content.tags.join(',')}')" 
-                            class="block w-full py-4 px-6 bg-gray-700 text-white font-medium rounded-xl hover:bg-indigo-600 transition duration-300 text-center shadow-md">
-                        ${link.episode_title}
-                    </button>
-                </li>
-            `).join('');
-
-            document.getElementById('links-modal').classList.remove('hidden');
-            document.getElementById('links-modal').classList.add('flex');
-        }
-
-        /**
-         * Closes the Links Modal.
-         */
-        function closeLinksModal() {
-            document.getElementById('links-modal').classList.add('hidden');
-            document.getElementById('links-modal').classList.remove('flex');
-        }
-        
-        /**
-         * Opens the Video Player Modal.
-         */
-        function openPlayerModal(streamUrl, contentTitle, tagsString) {
-            closeLinksModal(); // Close the selection modal first
-
-            document.getElementById('player-modal-title').textContent = contentTitle;
-            document.getElementById('video-player-iframe').src = streamUrl;
-            
-            // Handle Similar Content (Tags)
-            const tagsContainer = document.getElementById('tags-container');
-            tagsContainer.innerHTML = ''; // Clear old tags
-
-            const tags = tagsString.split(',').filter(t => t.trim() !== '');
-
-            if (tags.length > 0) {
-                tags.forEach(tag => {
-                    tagsContainer.innerHTML += `
-                        <span class="px-3 py-1 bg-gray-700 text-indigo-400 text-sm font-medium rounded-full cursor-pointer hover:bg-indigo-500 hover:text-white transition duration-200"
-                            onclick="document.getElementById('search-input').value = '${tag.trim()}'; handleSearch(); closePlayerModal();">
-                            #${tag.trim()}
-                        </span>
-                    `;
-                });
-            } else {
-                 tagsContainer.innerHTML = '<p class="text-gray-500">No tags provided for this content.</p>';
-            }
-
-            document.getElementById('player-modal').classList.remove('hidden');
-            document.getElementById('player-modal').classList.add('flex');
-        }
-
-        /**
-         * Closes the Video Player Modal and resets the iframe src.
-         */
-        function closePlayerModal() {
-            document.getElementById('player-modal').classList.add('hidden');
-            document.getElementById('player-modal').classList.remove('flex');
-            // Stop video playback by clearing the source
-            document.getElementById('video-player-iframe').src = '';
-        }
-
-        // Universal Escape key listener for both modals
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                if (!document.getElementById('player-modal').classList.contains('hidden')) {
-                    closePlayerModal();
-                } else if (!document.getElementById('links-modal').classList.contains('hidden')) {
-                    closeLinksModal();
-                }
-            }
-        });
-        
-        // Close modals on outside click
-        document.getElementById('links-modal').addEventListener('click', (e) => {
-            if (e.target.id === 'links-modal') closeLinksModal();
-        });
-        document.getElementById('player-modal').addEventListener('click', (e) => {
-            if (e.target.id === 'player-modal') closePlayerModal();
-        });
-
-        // Load content on page load
-        fetchContent();
-    </script>
-</body>
-</html>'''
-
-@app.route('/health')
+@app.route('/health', methods=['GET'])
 def health():
-    """Koyeb health check endpoint."""
+    """Health check endpoint."""
     try:
         if content_collection is not None:
             client.admin.command('ping')
@@ -829,21 +451,13 @@ def webhook():
 
 @app.route('/api/content', methods=['GET'])
 def get_content():
-    """REST API endpoint for the frontend to fetch content."""
+    """REST API endpoint for the frontend to fetch all content."""
     if content_collection is None:
         return jsonify({"error": "Database not configured."}), 503
 
     try:
-        # Optional query parameters for filtering
-        content_type = request.args.get('type')
-        limit = int(request.args.get('limit', 100))
-        
-        query = {}
-        if content_type:
-            query['type'] = content_type
-        
         # Sort by creation date descending
-        content_cursor = content_collection.find(query).sort("created_at", -1).limit(limit)
+        content_cursor = content_collection.find().sort("created_at", -1).limit(100)
         
         content_list = []
         for doc in content_cursor:
@@ -861,27 +475,46 @@ def get_content():
         logger.error(f"API Fetch Error: {e}")
         return jsonify({"success": False, "error": "Failed to retrieve content."}), 500
 
-@app.route('/api/content/<content_id>', methods=['GET'])
-def get_content_by_id(content_id):
-    """Get a single content item by ID."""
+
+@app.route('/api/content/similar/<tags>', methods=['GET'])
+def get_similar_content(tags):
+    """
+    API endpoint to fetch content that shares at least one tag.
+    """
     if content_collection is None:
         return jsonify({"error": "Database not configured."}), 503
-    
+
+    # Clean and lowercase the input tags
+    target_tags = [t.strip().lower() for t in tags.split(',') if t.strip()]
+
+    if not target_tags:
+        return jsonify({"success": True, "data": []}), 200
+
     try:
-        doc = content_collection.find_one({"_id": ObjectId(content_id)})
+        # Find documents where the 'tags' array contains at least one of the target_tags
+        query = {"tags": {"$in": target_tags}}
         
-        if doc:
+        # Limit results and sort by date descending
+        content_cursor = content_collection.find(query).sort("created_at", -1).limit(10)
+        
+        content_list = []
+        for doc in content_cursor:
             doc['_id'] = str(doc['_id'])
             if 'created_at' in doc:
                 doc['created_at'] = doc['created_at'].isoformat()
-            return jsonify({"success": True, "data": doc}), 200
-        else:
-            return jsonify({"success": False, "error": "Content not found"}), 404
+            content_list.append(doc)
+            
+        return jsonify({
+            "success": True,
+            "count": len(content_list),
+            "data": content_list
+        }), 200
     except Exception as e:
-        logger.error(f"API Fetch Error: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        logger.error(f"API Similar Fetch Error: {e}")
+        return jsonify({"success": False, "error": "Failed to retrieve similar content."}), 500
 
-# --- 7. APPLICATION STARTUP ---
+
+# --- 6. APPLICATION STARTUP ---
 
 def set_webhook():
     """Set the webhook URL for Telegram."""
