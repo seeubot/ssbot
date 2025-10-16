@@ -50,6 +50,12 @@
     </style>
 </head>
 <body class="min-h-screen p-4 sm:p-8">
+    
+    <div id="admin-panel" class="fixed top-4 left-4 bg-gray-800 p-4 rounded-lg z-50 hidden border border-gray-700 shadow-xl">
+        <h3 class="text-white font-bold mb-3 border-b border-gray-700 pb-1">Admin Panel</h3>
+        <input type="text" id="2fa-token" placeholder="2FA Token" class="p-2 w-full text-white bg-gray-700 rounded mb-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition" />
+        <button onclick="verifyAdmin()" class="w-full bg-blue-600 hover:bg-blue-700 text-white p-2 rounded font-semibold transition duration-200">Verify</button>
+    </div>
     <div class="max-w-7xl mx-auto">
         
         <header class="text-center mb-10 pt-4 sm:pt-8">
@@ -197,8 +203,7 @@
                 loadingElement.classList.add('hidden');
             }
         }
-        
-        // --- NEW VIEW COUNT TRACKING FUNCTION ---
+
         /**
          * Tracks a view for a given content ID.
          */
@@ -216,7 +221,6 @@
             }
         }
         
-        // --- MODIFIED RENDER CONTENT CARDS FUNCTION ---
         /**
          * Renders content cards in a specified container.
          * Now includes a view count badge.
@@ -265,7 +269,7 @@
             }).join('');
         }
 
-        // --- MODIFIED HANDLE CARD CLICK FUNCTION ---
+
         /**
          * Handles the click action on a content card based on content type.
          * Now tracks the view before redirecting or opening the modal.
@@ -391,6 +395,41 @@
                 discoverLoading.classList.add('hidden');
             }
         }
+
+        // --- NEW ADMIN PANEL FUNCTIONS START ---
+        
+        /**
+         * Shows the hidden admin panel overlay.
+         */
+        function showAdminPanel() {
+            document.getElementById('admin-panel').classList.remove('hidden');
+        }
+
+        /**
+         * Sends the 2FA token to the backend for verification.
+         */
+        async function verifyAdmin() {
+            const token = document.getElementById('2fa-token').value;
+            const response = await fetch(API_BASE_URL + '/api/auth/verify-2fa', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                // Assuming 'admin' is the hardcoded username for the admin panel
+                body: JSON.stringify({username: 'admin', token: token}) 
+            });
+            
+            const result = await response.json();
+            if (response.ok && result.success) { // Check response.ok for better error handling
+                alert('Admin access granted!');
+                // Placeholder: Here you would typically store the token/session and show admin buttons/links
+                // For now, we'll just hide the panel on success.
+                document.getElementById('admin-panel').classList.add('hidden'); 
+            } else {
+                // Use the error message from the backend if available
+                alert(result.message || 'Invalid 2FA token or server error.'); 
+            }
+        }
+        
+        // --- NEW ADMIN PANEL FUNCTIONS END ---
 
 
         // Universal Escape key listener for the modal
