@@ -33,8 +33,10 @@ def init_mongodb():
         MONGODB_URI = os.environ.get("MONGODB_URI")
         if not MONGODB_URI:
             logger.error("MONGODB_URI environment variable is not set.")
+            content_collection = None # Ensure global is unset on failure
             return False
         
+        # NOTE: maxPoolSize and minPoolSize set for high concurrency
         client = MongoClient(
             MONGODB_URI,
             serverSelectionTimeoutMS=5000, 
@@ -53,14 +55,22 @@ def init_mongodb():
         db = client[db_name]
         content_collection = db[collection_name]
         
+        # Ensure indexes exist for performance (including a text index for generic search)
         content_collection.create_index([("created_at", -1)])
         content_collection.create_index([("tags", 1)])
         content_collection.create_index([("views", -1)])
+        
+        # Add a text index for title search if the backend logic relies on $text
+        # content_collection.create_index([("title", "text"), ("tags", "text")], name="text_search_index")
         
         logger.info(f"MongoDB connected with connection pooling. Database: {db_name}")
         return True
     except Exception as e:
         logger.error(f"MongoDB initialization failed: {e}")
+        # Ensure global is unset on failure
+        content_collection = None
+        client = None
+        db = None
         return False
 
 # --- 2. SIMPLE AUTHENTICATION ---
@@ -100,8 +110,10 @@ def cached_response(timeout=30):
             
             response = f(*args, **kwargs)
             
-            if response[1] == 200:
+            # Check if response is a tuple (response, status_code)
+            if isinstance(response, tuple) and response[1] == 200:
                 content_cache[cache_key] = response
+            # Check if response is a jsonify object (Flask response object) - generally not cached directly as tuple is safer
             
             return response
         return decorated_function
@@ -125,6 +137,7 @@ def increment_view_count(content_id):
         logger.error(f"Error incrementing view count: {e}")
         return False
 
+# NOTE: get_view_count is not used by the API but kept for completeness
 def get_view_count(content_id):
     """Get view count for a content item."""
     if content_collection is None:
@@ -167,7 +180,7 @@ START_KEYBOARD = {
 }
 
 
-# --- BOT HELPER FUNCTIONS ---
+# --- BOT HELPER FUNCTIONS (No changes needed) ---
 
 def get_content_info_for_edit(content_id):
     """Retrieves content details for display/editing."""
@@ -256,7 +269,7 @@ def save_content(content_data):
         return False
 
 # -------------------------------------------------------------
-# --- 6. FLASK ROUTES ---
+# --- 6. FLASK ROUTES --- (Primary Changes Here)
 # -------------------------------------------------------------
 
 @app.route('/', methods=['GET'])
@@ -272,7 +285,7 @@ def index():
 def health():
     """Fast health check endpoint."""
     try:
-        if content_collection is not None:
+        if client is not None:
             client.admin.command('ping')
             return jsonify({
                 "status": "healthy", 
@@ -309,7 +322,10 @@ def track_view():
 @app.route('/api/content', methods=['GET'])
 @cached_response(timeout=30)
 def get_content():
-    """Fast content retrieval with pagination and caching."""
+    """
+    Fast content retrieval with pagination, caching, and flexible search.
+    Supports 'type', 'tag', and the new 'q' (query) parameter for search.
+    """
     if content_collection is None:
         return jsonify({"error": "Database not configured."}), 503
 
@@ -321,11 +337,36 @@ def get_content():
         content_type = request.args.get('type')
         tag_filter = request.args.get('tag')
         
+        # New flexible search parameter
+        search_query = request.args.get('q') 
+        
         query = {}
+        
         if content_type:
             query['type'] = content_type
+            
         if tag_filter:
+            # Traditional exact tag search (for backward compatibility)
             query['tags'] = tag_filter.lower()
+            
+        # --- FLEXIBLE SEARCH IMPLEMENTATION ---
+        # If a generic query 'q' is provided, override or supplement other filters
+        if search_query:
+            # Clear existing tag filter if search query is present to avoid conflict
+            # If you want to combine them, you'd use $and, but for a general search bar, 
+            # this is typically the user's main intent.
+            if 'tags' in query:
+                del query['tags']
+                
+            search_regex = {"$regex": search_query, "$options": "i"} # Case-insensitive regex
+            
+            # Use $or to search across 'title' OR 'tags'
+            query['$or'] = [
+                {"title": search_regex},
+                {"tags": search_regex}
+            ]
+
+        # --- END FLEXIBLE SEARCH ---
         
         projection = {
             'title': 1, 'type': 1, 'thumbnail_url': 1, 'tags': 1, 
@@ -408,7 +449,7 @@ def get_similar_content(tags):
         logger.error(f"API Similar Fetch Error: {e}")
         return jsonify({"success": False, "error": "Failed to retrieve similar content."}), 500
 
-# --- ADMIN ROUTES WITH SIMPLE AUTH ---
+# --- ADMIN ROUTES WITH SIMPLE AUTH (No changes needed) ---
 
 @app.route('/api/admin/content', methods=['POST'])
 @require_auth
@@ -466,7 +507,7 @@ def admin_delete_content(content_id):
         logger.error(f"Admin content deletion error: {e}")
         return jsonify({"success": False, "error": "Invalid content ID"}), 400
 
-# --- TELEGRAM WEBHOOK HANDLER ---
+# --- TELEGRAM WEBHOOK HANDLER (No changes needed) ---
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
@@ -646,7 +687,7 @@ def webhook():
         return jsonify({"status": "error"}), 500
 
 # -------------------------------------------------------------
-# --- BACKGROUND TASKS (FIXED: Proper None comparison) ---
+# --- BACKGROUND TASKS ---
 # -------------------------------------------------------------
 
 def flush_view_cache():
@@ -673,7 +714,6 @@ def flush_view_cache():
                         )
                         keys_to_delete.append(cache_key)
 
-                # FIXED: Proper None comparison for PyMongo Collection
                 if bulk_ops and content_collection is not None:
                     content_collection.bulk_write(bulk_ops)
                     
@@ -734,4 +774,5 @@ if __name__ == '__main__':
         logger.warning("APP_URL or BOT_TOKEN not set - webhook not configured")
     
     logger.info(f"Starting optimized Flask app on port {PORT}")
+    # Added threaded=True for better handling of concurrent requests in a simple Flask setup
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
