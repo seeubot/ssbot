@@ -158,7 +158,7 @@ GROUP_WELCOME_SENT = set() # To track users welcomed in the group
 # Telegram Bot keyboard templates
 START_KEYBOARD = {
     'keyboard': [
-        [{'text': '/add'}, {'text': '/edit'}, {'text': '/delete'}, {'text': '/files'}], # Added /files button
+        [{'text': '/add'}, {'text': '/edit'}, {'text': '/delete'}, {'text': '/files'}], 
         [{'text': '/cancel'}]
     ],
     'resize_keyboard': True,
@@ -219,7 +219,8 @@ def send_message(chat_id, text, reply_markup=None):
     if reply_markup is not None:
         payload['reply_markup'] = json.dumps(reply_markup)
     else:
-        # Only show keyboard if we are in the main state of a private chat
+        # Only show keyboard if we are in the main state of a private chat (chat_id > 0)
+        # and the user is the admin.
         if chat_id > 0 and USER_STATE.get(chat_id, {}).get('step') == 'main':
              payload['reply_markup'] = json.dumps(START_KEYBOARD)
 
@@ -513,7 +514,7 @@ def webhook():
         user_id = message['from']['id'] # Get the user's ID
         user_state = USER_STATE.get(chat_id, {'step': 'main'})
         
-        # 1. GROUP WELCOME MESSAGE (Once per user)
+        # 1. GROUP WELCOME MESSAGE (Automatic)
         if chat_id == GROUP_TELEGRAM_ID and 'new_chat_members' in message:
             for member in message['new_chat_members']:
                 member_id = member['id']
@@ -521,18 +522,26 @@ def webhook():
                 
                 # Check if we have already welcomed this user in the group (simple set check)
                 if member_id not in GROUP_WELCOME_SENT:
+                    # UPDATED: Removed reference to private chat bot usage
                     welcome_text = (
                         f"👋 Welcome, *{member_name}*, to the official *{PRODUCT_NAME}* group!\n\n"
-                        f"You can access all our content here: `{ACCESS_URL}`\n\n"
-                        "To manage content, please use the bot commands in a private chat."
+                        f"You can access all our content here: `{ACCESS_URL}`"
                     )
                     send_message(chat_id, welcome_text, reply_markup=None)
                     GROUP_WELCOME_SENT.add(member_id)
             return jsonify({"status": "ok"}), 200 # Do not process further in this group message
 
-        # 2. ADMIN BROADCAST COMMAND (Admin only)
+        # 2. ADMIN-ONLY RESTRICTION (Gatekeeper for all Private Chat interactions)
+        # chat_id > 0 means it's a private chat (groups have negative chat_ids)
+        if chat_id > 0 and user_id != ADMIN_TELEGRAM_ID:
+            send_message(chat_id, "❌ **Access Denied.** Only the administrator can use this bot.")
+            return jsonify({"status": "unauthorized"}), 200
+        
+        # --- Command Handlers (Only Admin reaches this point in Private Chat) ---
+        
+        # 3. ADMIN BROADCAST COMMAND 
         if text.startswith('/broadcast'):
-            # Restrict this command to the specified admin ID
+            # The user_id check here is redundant due to the gatekeeper above, but kept for high-risk command safety
             if user_id == ADMIN_TELEGRAM_ID:
                 USER_STATE[chat_id] = {'step': 'broadcast_message'}
                 send_message(chat_id, "➡️ **ADMIN BROADCAST:** Send the message you want to broadcast to the group.")
@@ -540,11 +549,9 @@ def webhook():
                 send_message(chat_id, "❌ **Access Denied.** This command is for administrators only.", START_KEYBOARD)
             return jsonify({"status": "ok"}), 200 
             
-        # --- Command Handlers ---
-        
-        if text.startswith('/start'):
+        elif text.startswith('/start'):
             USER_STATE[chat_id] = {'step': 'main'}
-            send_message(chat_id, f"🚀 Welcome to the *{PRODUCT_NAME}* Bot! Choose an action:", START_KEYBOARD)
+            send_message(chat_id, f"🚀 Welcome back, Admin! What would you like to do in *{PRODUCT_NAME}*?", START_KEYBOARD)
             
         elif text.startswith('/add'):
             USER_STATE[chat_id] = {'step': 'add_title', 'data': {'links': []}}
@@ -562,7 +569,7 @@ def webhook():
             USER_STATE[chat_id] = {'step': 'main'}
             send_message(chat_id, "Operation cancelled. Choose a new action:", START_KEYBOARD)
             
-        # 3. LIST FILES COMMAND
+        # 4. LIST FILES COMMAND
         elif text.startswith('/files'):
             if content_collection is None:
                 send_message(chat_id, "❌ Database is currently unavailable.")
@@ -590,8 +597,8 @@ def webhook():
                 
         # --- Multi-step Input Handlers ---
         
-        # 4. BROADCAST FLOW HANDLER
-        elif user_state['step'] == 'broadcast_message' and user_id == ADMIN_TELEGRAM_ID:
+        # 5. BROADCAST FLOW HANDLER
+        elif user_state['step'] == 'broadcast_message':
             broadcast_text = text
             send_message(GROUP_TELEGRAM_ID, f"📢 **ADMIN ANNOUNCEMENT**:\n\n{broadcast_text}")
             send_message(chat_id, "✅ Message broadcasted to the group successfully.", START_KEYBOARD)
