@@ -649,8 +649,26 @@ def webhook():
 
         elif user_state['step'] == 'add_episode_url':
             episode_title = user_state['data'].pop('current_episode_title', 'Link')
+            submitted_url = text
+            modified_url = submitted_url
+            
+            LULUVID_DOMAIN = 'https://luluvid.com/'
+            LULUVID_EMBED = 'https://luluvid.com/e/'
+
+            # --- LULUVid URL Modification Logic ---
+            if submitted_url.startswith(LULUVID_DOMAIN) and not submitted_url.startswith(LULUVID_EMBED):
+                # Check if it's the root domain + content path (e.g., https://luluvid.com/12345)
+                content_path = submitted_url[len(LULUVID_DOMAIN):].strip('/')
+                
+                # Ensure the path contains only the content ID and not other query params or paths
+                # If there's no slash in the remaining path, it's likely a direct content link
+                if content_path and '/' not in content_path:
+                    modified_url = LULUVID_EMBED + content_path
+                    logger.info(f"LULUVID modification: {submitted_url} -> {modified_url}")
+            # --- End LULUVid URL Modification Logic ---
+                
             user_state['data']['links'].append({
-                "url": text,
+                "url": modified_url, 
                 "episode_title": episode_title
             })
             
@@ -701,13 +719,26 @@ def webhook():
             if field == 'tags':
                 update_data['tags'] = [t.strip().lower() for t in text.split(',') if t.strip()]
             elif field == 'links':
+                modified_link_text = text
+                
+                LULUVID_DOMAIN = 'https://luluvid.com/'
+                LULUVID_EMBED = 'https://luluvid.com/e/'
+
+                # Apply LULUVid modification to the single link update as well
+                if modified_link_text.startswith(LULUVID_DOMAIN) and not modified_link_text.startswith(LULUVID_EMBED):
+                    content_path = modified_link_text[len(LULUVID_DOMAIN):].strip('/')
+                    if content_path and '/' not in content_path:
+                        modified_link_text = LULUVID_EMBED + content_path
+                        logger.info(f"LULUVID Edit modification: {text} -> {modified_link_text}")
+
                 try:
-                    links = json.loads(text)
+                    links = json.loads(modified_link_text)
                     if not isinstance(links, list): raise ValueError
                     update_data['links'] = links
                 except:
                     # Fallback to single link for simpler input
-                    update_data['links'] = [{"url": text, "episode_title": "Watch Link"}]
+                    update_data['links'] = [{"url": modified_link_text, "episode_title": "Watch Link"}]
+                    
             elif field == 'title':
                 update_data['title'] = text
             elif field == 'type':
