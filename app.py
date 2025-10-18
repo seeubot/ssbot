@@ -13,6 +13,12 @@ import threading
 from cachetools import TTLCache
 import pymongo.operations 
 
+# --- CONSTANTS & CONFIGURATION ---
+ADMIN_TELEGRAM_ID = 1352497419  # User's specified admin ID for Telegram commands
+GROUP_TELEGRAM_ID = -1002541647242 # User's specified target group ID
+PRODUCT_NAME = "Adult-Hub"
+ACCESS_URL = "teluguxx.vercel.app"
+
 # --- LOGGING SETUP ---
 logging.basicConfig(
     level=logging.INFO,
@@ -60,9 +66,6 @@ def init_mongodb():
         content_collection.create_index([("tags", 1)])
         content_collection.create_index([("views", -1)])
         
-        # Add a text index for title search if the backend logic relies on $text
-        # content_collection.create_index([("title", "text"), ("tags", "text")], name="text_search_index")
-        
         logger.info(f"MongoDB connected with connection pooling. Database: {db_name}")
         return True
     except Exception as e:
@@ -76,7 +79,6 @@ def init_mongodb():
 # --- 2. SIMPLE AUTHENTICATION ---
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
-AUTHORIZED_CHAT_ID = os.environ.get("AUTHORIZED_CHAT_ID")
 
 def require_auth(f):
     """Simple authentication decorator for API access."""
@@ -110,10 +112,9 @@ def cached_response(timeout=30):
             
             response = f(*args, **kwargs)
             
-            # Check if response is a tuple (response, status_code)
+            # Cache only successful 200 responses
             if isinstance(response, tuple) and response[1] == 200:
                 content_cache[cache_key] = response
-            # Check if response is a jsonify object (Flask response object) - generally not cached directly as tuple is safer
             
             return response
         return decorated_function
@@ -137,22 +138,6 @@ def increment_view_count(content_id):
         logger.error(f"Error incrementing view count: {e}")
         return False
 
-# NOTE: get_view_count is not used by the API but kept for completeness
-def get_view_count(content_id):
-    """Get view count for a content item."""
-    if content_collection is None:
-        return 0
-    
-    try:
-        doc = content_collection.find_one(
-            {"_id": ObjectId(content_id)}, 
-            {"views": 1}
-        )
-        return doc.get('views', 0) if doc else 0
-    except Exception as e:
-        logger.error(f"Error getting view count: {e}")
-        return 0
-
 # --- 5. TELEGRAM AND FLASK SETUP ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 APP_URL = os.environ.get("APP_URL")
@@ -168,11 +153,12 @@ CORS(app)
 
 # Global state to track multi-step conversation
 USER_STATE = {}
+GROUP_WELCOME_SENT = set() # To track users welcomed in the group
 
 # Telegram Bot keyboard templates
 START_KEYBOARD = {
     'keyboard': [
-        [{'text': '/add'}, {'text': '/edit'}, {'text': '/delete'}],
+        [{'text': '/add'}, {'text': '/edit'}, {'text': '/delete'}, {'text': '/files'}], # Added /files button
         [{'text': '/cancel'}]
     ],
     'resize_keyboard': True,
@@ -180,7 +166,7 @@ START_KEYBOARD = {
 }
 
 
-# --- BOT HELPER FUNCTIONS (No changes needed) ---
+# --- BOT HELPER FUNCTIONS ---
 
 def get_content_info_for_edit(content_id):
     """Retrieves content details for display/editing."""
@@ -233,7 +219,8 @@ def send_message(chat_id, text, reply_markup=None):
     if reply_markup is not None:
         payload['reply_markup'] = json.dumps(reply_markup)
     else:
-        if USER_STATE.get(chat_id, {}).get('step') == 'main':
+        # Only show keyboard if we are in the main state of a private chat
+        if chat_id > 0 and USER_STATE.get(chat_id, {}).get('step') == 'main':
              payload['reply_markup'] = json.dumps(START_KEYBOARD)
 
     try:
@@ -269,14 +256,14 @@ def save_content(content_data):
         return False
 
 # -------------------------------------------------------------
-# --- 6. FLASK ROUTES --- (Primary Changes Here)
+# --- 6. FLASK ROUTES ---
 # -------------------------------------------------------------
 
 @app.route('/', methods=['GET'])
 def index():
     """Simple status check."""
     return jsonify({
-        "service": "StreamHub", 
+        "service": PRODUCT_NAME, 
         "status": "online",
         "timestamp": datetime.utcnow().isoformat()
     }), 200
@@ -350,11 +337,7 @@ def get_content():
             query['tags'] = tag_filter.lower()
             
         # --- FLEXIBLE SEARCH IMPLEMENTATION ---
-        # If a generic query 'q' is provided, override or supplement other filters
         if search_query:
-            # Clear existing tag filter if search query is present to avoid conflict
-            # If you want to combine them, you'd use $and, but for a general search bar, 
-            # this is typically the user's main intent.
             if 'tags' in query:
                 del query['tags']
                 
@@ -434,6 +417,7 @@ def get_similar_content(tags):
         return jsonify({"success": True, "data": []}), 200
 
     try:
+        # Use $in for efficient querying of documents matching any of the tags
         query = {"tags": {"$in": target_tags}}
         content_cursor = content_collection.find(query).sort("views", -1).limit(10)
         
@@ -449,7 +433,7 @@ def get_similar_content(tags):
         logger.error(f"API Similar Fetch Error: {e}")
         return jsonify({"success": False, "error": "Failed to retrieve similar content."}), 500
 
-# --- ADMIN ROUTES WITH SIMPLE AUTH (No changes needed) ---
+# --- ADMIN ROUTES WITH SIMPLE AUTH ---
 
 @app.route('/api/admin/content', methods=['POST'])
 @require_auth
@@ -507,7 +491,7 @@ def admin_delete_content(content_id):
         logger.error(f"Admin content deletion error: {e}")
         return jsonify({"success": False, "error": "Invalid content ID"}), 400
 
-# --- TELEGRAM WEBHOOK HANDLER (No changes needed) ---
+# --- TELEGRAM WEBHOOK HANDLER ---
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
@@ -526,13 +510,41 @@ def webhook():
             
         chat_id = message['chat']['id']
         text = message.get('text', '').strip()
+        user_id = message['from']['id'] # Get the user's ID
         user_state = USER_STATE.get(chat_id, {'step': 'main'})
         
+        # 1. GROUP WELCOME MESSAGE (Once per user)
+        if chat_id == GROUP_TELEGRAM_ID and 'new_chat_members' in message:
+            for member in message['new_chat_members']:
+                member_id = member['id']
+                member_name = member.get('first_name', 'New User')
+                
+                # Check if we have already welcomed this user in the group (simple set check)
+                if member_id not in GROUP_WELCOME_SENT:
+                    welcome_text = (
+                        f"👋 Welcome, *{member_name}*, to the official *{PRODUCT_NAME}* group!\n\n"
+                        f"You can access all our content here: `{ACCESS_URL}`\n\n"
+                        "To manage content, please use the bot commands in a private chat."
+                    )
+                    send_message(chat_id, welcome_text, reply_markup=None)
+                    GROUP_WELCOME_SENT.add(member_id)
+            return jsonify({"status": "ok"}), 200 # Do not process further in this group message
+
+        # 2. ADMIN BROADCAST COMMAND (Admin only)
+        if text.startswith('/broadcast'):
+            # Restrict this command to the specified admin ID
+            if user_id == ADMIN_TELEGRAM_ID:
+                USER_STATE[chat_id] = {'step': 'broadcast_message'}
+                send_message(chat_id, "➡️ **ADMIN BROADCAST:** Send the message you want to broadcast to the group.")
+            else:
+                send_message(chat_id, "❌ **Access Denied.** This command is for administrators only.", START_KEYBOARD)
+            return jsonify({"status": "ok"}), 200 
+            
         # --- Command Handlers ---
         
         if text.startswith('/start'):
             USER_STATE[chat_id] = {'step': 'main'}
-            send_message(chat_id, "🚀 Welcome to StreamHub Bot! Choose an action:", START_KEYBOARD)
+            send_message(chat_id, f"🚀 Welcome to the *{PRODUCT_NAME}* Bot! Choose an action:", START_KEYBOARD)
             
         elif text.startswith('/add'):
             USER_STATE[chat_id] = {'step': 'add_title', 'data': {'links': []}}
@@ -550,8 +562,41 @@ def webhook():
             USER_STATE[chat_id] = {'step': 'main'}
             send_message(chat_id, "Operation cancelled. Choose a new action:", START_KEYBOARD)
             
+        # 3. LIST FILES COMMAND
+        elif text.startswith('/files'):
+            if content_collection is None:
+                send_message(chat_id, "❌ Database is currently unavailable.")
+                return jsonify({"status": "ok"}), 200
+                
+            try:
+                # Fetch top 10 most recent titles and IDs
+                content_cursor = content_collection.find({}, {'title': 1, 'created_at': 1}).sort("created_at", -1).limit(10)
+                
+                content_list_text = []
+                for i, doc in enumerate(content_cursor):
+                    title = doc.get('title', 'No Title')
+                    _id = str(doc['_id'])
+                    content_list_text.append(f"*{i+1}. {title}* (`{_id}`)")
+                    
+                if content_list_text:
+                    response_text = "📚 **Latest 10 Content Items (Title & ID):**\n\n" + "\n".join(content_list_text)
+                else:
+                    response_text = "No content has been uploaded yet."
+                
+                send_message(chat_id, response_text, START_KEYBOARD)
+            except Exception as e:
+                logger.error(f"Error fetching files list: {e}")
+                send_message(chat_id, "❌ An error occurred while fetching the file list.")
+                
         # --- Multi-step Input Handlers ---
         
+        # 4. BROADCAST FLOW HANDLER
+        elif user_state['step'] == 'broadcast_message' and user_id == ADMIN_TELEGRAM_ID:
+            broadcast_text = text
+            send_message(GROUP_TELEGRAM_ID, f"📢 **ADMIN ANNOUNCEMENT**:\n\n{broadcast_text}")
+            send_message(chat_id, "✅ Message broadcasted to the group successfully.", START_KEYBOARD)
+            USER_STATE[chat_id] = {'step': 'main'}
+
         elif user_state['step'] == 'add_title':
             user_state['data']['title'] = text
             user_state['step'] = 'add_type'
@@ -582,7 +627,10 @@ def webhook():
                 # --- FINAL SAVE ACTION ---
                 content_id = save_content(user_state['data'])
                 if content_id:
-                    send_message(chat_id, f"🎉 **Success!** Content '{user_state['data']['title']}' added with ID: `{content_id}`.", START_KEYBOARD)
+                    send_message(chat_id, 
+                                 f"🎉 **Success!** Content '{user_state['data']['title']}' added to {PRODUCT_NAME} with ID: `{content_id}`.\n"
+                                 f"Access content at: `{ACCESS_URL}`", 
+                                 START_KEYBOARD)
                 else:
                     send_message(chat_id, "❌ **Save Failed.** Check server logs for MongoDB error.", START_KEYBOARD)
                 
@@ -651,9 +699,14 @@ def webhook():
                     if not isinstance(links, list): raise ValueError
                     update_data['links'] = links
                 except:
+                    # Fallback to single link for simpler input
                     update_data['links'] = [{"url": text, "episode_title": "Watch Link"}]
-            else:
-                update_data[field] = text
+            elif field == 'title':
+                update_data['title'] = text
+            elif field == 'type':
+                update_data['type'] = text
+            elif field == 'thumbnail_url':
+                update_data['thumbnail_url'] = text
             
             if update_content(content_id, update_data):
                 send_message(chat_id, f"✅ **Success!** {field.replace('_', ' ').title()} for ID `{content_id}` updated.", START_KEYBOARD)
@@ -678,8 +731,7 @@ def webhook():
 
             USER_STATE[chat_id] = {'step': 'main'}
             
-        else:
-            send_message(chat_id, "I don't understand that. Use /start to see the options.", START_KEYBOARD)
+        # NO GENERIC ELSE BLOCK: Bot ignores messages outside of commands or active state.
         
         return jsonify({"status": "ok"}), 200
     except Exception as e:
@@ -706,17 +758,21 @@ def flush_view_cache():
                 for cache_key, count in list(view_count_cache.items()): 
                     if count > 0:
                         content_id = cache_key.replace('views_', '')
-                        bulk_ops.append(
-                            pymongo.operations.UpdateOne(
-                                {"_id": ObjectId(content_id)},
-                                {"$inc": {"views": count}}
+                        # Ensure ID is valid before creating the operation
+                        if ObjectId.is_valid(content_id):
+                            bulk_ops.append(
+                                pymongo.operations.UpdateOne(
+                                    {"_id": ObjectId(content_id)},
+                                    {"$inc": {"views": count}, "$set": {"last_viewed": datetime.utcnow()}}
+                                )
                             )
-                        )
-                        keys_to_delete.append(cache_key)
+                            keys_to_delete.append(cache_key)
 
                 if bulk_ops and content_collection is not None:
+                    # Write all updates in one bulk operation for efficiency
                     content_collection.bulk_write(bulk_ops)
                     
+                    # Clear processed keys from the in-memory cache
                     for key in keys_to_delete:
                         if key in view_count_cache:
                             del view_count_cache[key] 
@@ -760,7 +816,7 @@ def before_request():
         init_mongodb()
 
 if __name__ == '__main__':
-    logger.info("Starting Optimized StreamHub Application...")
+    logger.info("Starting Optimized StreamHub (Adult-Hub) Application...")
     
     init_mongodb()
     
@@ -774,5 +830,5 @@ if __name__ == '__main__':
         logger.warning("APP_URL or BOT_TOKEN not set - webhook not configured")
     
     logger.info(f"Starting optimized Flask app on port {PORT}")
-    # Added threaded=True for better handling of concurrent requests in a simple Flask setup
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+
