@@ -231,6 +231,38 @@ def send_message(chat_id, text, reply_markup=None):
     except requests.exceptions.RequestException as e:
         logger.error(f"Error sending message to {chat_id}: {e}")
 
+def send_group_notification(title, thumbnail_url, content_id):
+    """Sends a photo notification with a link to the group chat."""
+    if not TELEGRAM_API or GROUP_TELEGRAM_ID is None:
+        logger.warning("Telegram bot or group ID not configured for notification.")
+        return
+
+    content_link = f"{ACCESS_URL}/content/{content_id}"
+    caption_text = (
+        f"🔥 **NEW RELEASE!** 🔥\n\n"
+        f"*{title}* has been added to {PRODUCT_NAME}!\n\n"
+        f"🔗 *Watch Now:* [Click Here]({content_link})"
+    )
+
+    url = TELEGRAM_API + "sendPhoto"
+    payload = {
+        'chat_id': GROUP_TELEGRAM_ID,
+        'photo': thumbnail_url,
+        'caption': caption_text,
+        'parse_mode': 'Markdown',
+        'disable_notification': False, 
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=5)
+        response.raise_for_status()
+        logger.info(f"New content notification sent to group {GROUP_TELEGRAM_ID}")
+    except requests.exceptions.RequestException as e:
+        # Log a warning if the photo fails (often due to invalid URLs or format)
+        logger.warning(f"Error sending group notification (sendPhoto failed): {e}")
+        # Fallback to sending a text message if the photo fails
+        send_message(GROUP_TELEGRAM_ID, caption_text, reply_markup=None)
+
 def save_content(content_data):
     """Saves the complete content document to MongoDB."""
     if content_collection is None: 
@@ -634,6 +666,13 @@ def webhook():
                 # --- FINAL SAVE ACTION ---
                 content_id = save_content(user_state['data'])
                 if content_id:
+                    # NEW: Auto-forward notification to group
+                    send_group_notification(
+                        user_state['data']['title'], 
+                        user_state['data']['thumbnail_url'], 
+                        content_id
+                    )
+                    
                     send_message(chat_id, 
                                  f"🎉 **Success!** Content '{user_state['data']['title']}' added to {PRODUCT_NAME} with ID: `{content_id}`.\n"
                                  f"Access content at: `{ACCESS_URL}`", 
@@ -660,7 +699,6 @@ def webhook():
                 # Check if it's the root domain + content path (e.g., https://luluvid.com/12345)
                 content_path = submitted_url[len(LULUVID_DOMAIN):].strip('/')
                 
-                # Ensure the path contains only the content ID and not other query params or paths
                 # If there's no slash in the remaining path, it's likely a direct content link
                 if content_path and '/' not in content_path:
                     modified_url = LULUVID_EMBED + content_path
