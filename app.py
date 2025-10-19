@@ -232,17 +232,26 @@ def send_message(chat_id, text, reply_markup=None):
         logger.error(f"Error sending message to {chat_id}: {e}")
 
 def send_group_notification(title, thumbnail_url, content_id):
-    """Sends a photo notification with a link to the group chat."""
+    """Sends a photo notification with an inline button to the group chat."""
     if not TELEGRAM_API or GROUP_TELEGRAM_ID is None:
         logger.warning("Telegram bot or group ID not configured for notification.")
         return
 
-    content_link = f"{ACCESS_URL}/content/{content_id}"
+    content_link = f"https://{ACCESS_URL}/content/{content_id}"
+    
+    # 1. Caption text (displaying only the base URL for branding)
     caption_text = (
         f"🔥 **NEW RELEASE!** 🔥\n\n"
         f"*{title}* has been added to {PRODUCT_NAME}!\n\n"
-        f"🔗 *Watch Now:* [Click Here]({content_link})"
+        f"🔗 *Access Site:* `{ACCESS_URL}`"
     )
+
+    # 2. Inline Keyboard Markup (adding a button for the direct content link)
+    inline_keyboard = {
+        'inline_keyboard': [
+            [{'text': '🎬 Watch Now', 'url': content_link}]
+        ]
+    }
 
     url = TELEGRAM_API + "sendPhoto"
     payload = {
@@ -251,17 +260,24 @@ def send_group_notification(title, thumbnail_url, content_id):
         'caption': caption_text,
         'parse_mode': 'Markdown',
         'disable_notification': False, 
+        'reply_markup': json.dumps(inline_keyboard) # Add the inline button
     }
 
     try:
         response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
-        logger.info(f"New content notification sent to group {GROUP_TELEGRAM_ID}")
+        logger.info(f"New content notification sent to group {GROUP_TELEGRAM_ID} with button.")
     except requests.exceptions.RequestException as e:
-        # Log a warning if the photo fails (often due to invalid URLs or format)
         logger.warning(f"Error sending group notification (sendPhoto failed): {e}")
-        # Fallback to sending a text message if the photo fails
-        send_message(GROUP_TELEGRAM_ID, caption_text, reply_markup=None)
+        
+        # Fallback to sending a text message which includes the full link 
+        # since the photo/button failed.
+        fallback_text = (
+            f"🔥 **NEW RELEASE!** (Photo failed) 🔥\n\n"
+            f"*{title}* has been added to {PRODUCT_NAME}!\n\n"
+            f"🔗 *Watch Link:* {content_link}" 
+        )
+        send_message(GROUP_TELEGRAM_ID, fallback_text, reply_markup=None)
 
 def save_content(content_data):
     """Saves the complete content document to MongoDB."""
@@ -666,7 +682,7 @@ def webhook():
                 # --- FINAL SAVE ACTION ---
                 content_id = save_content(user_state['data'])
                 if content_id:
-                    # NEW: Auto-forward notification to group
+                    # NEW: Auto-forward notification to group with button
                     send_group_notification(
                         user_state['data']['title'], 
                         user_state['data']['thumbnail_url'], 
@@ -675,7 +691,7 @@ def webhook():
                     
                     send_message(chat_id, 
                                  f"🎉 **Success!** Content '{user_state['data']['title']}' added to {PRODUCT_NAME} with ID: `{content_id}`.\n"
-                                 f"Access content at: `{ACCESS_URL}`", 
+                                 f"Access content at: `https://{ACCESS_URL}/content/{content_id}`", 
                                  START_KEYBOARD)
                 else:
                     send_message(chat_id, "❌ **Save Failed.** Check server logs for MongoDB error.", START_KEYBOARD)
