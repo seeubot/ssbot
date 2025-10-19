@@ -237,7 +237,8 @@ def send_group_notification(title, thumbnail_url, content_id):
         logger.warning("Telegram bot or group ID not configured for notification.")
         return
 
-    content_link = f"https://{ACCESS_URL}/content/{content_id}"
+    # UPDATED: Set the content_link to the base ACCESS_URL only
+    content_link = f"https://{ACCESS_URL}"
     
     # 1. Caption text (displaying only the base URL for branding)
     caption_text = (
@@ -249,7 +250,7 @@ def send_group_notification(title, thumbnail_url, content_id):
     # 2. Inline Keyboard Markup (adding a button for the direct content link)
     inline_keyboard = {
         'inline_keyboard': [
-            [{'text': '🎬 Watch Now', 'url': content_link}]
+            [{'text': '🎬 Watch Now', 'url': content_link}] # Button now uses the base URL
         ]
     }
 
@@ -689,6 +690,7 @@ def webhook():
                         content_id
                     )
                     
+                    # NOTE: This link shown to the admin in private chat still includes the ID for convenience
                     send_message(chat_id, 
                                  f"🎉 **Success!** Content '{user_state['data']['title']}' added to {PRODUCT_NAME} with ID: `{content_id}`.\n"
                                  f"Access content at: `https://{ACCESS_URL}/content/{content_id}`", 
