@@ -3,643 +3,493 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>StreamHub - Watch Free Online</title>
+    <title>Adult-Hub - Content Explorer</title>
+    <!-- Load Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Set Inter as default font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+    
     <style>
-        /* Custom styles for modern aesthetics and animations */
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
-        
-        * {
-            box-sizing: border-box;
+        :root {
+            --primary-color: #4ade80; /* Mint Green */
+            --secondary-color: #22c55e; /* Deeper Green for hover */
+            --background-dark: #111827; /* Deep Slate Blue */
+            --card-dark: #1f2937; /* Slightly lighter Slate for Cards/Surfaces */
+            --text-primary: #f9fafb; /* Off-white */
+            --text-secondary: #9ca3af; /* Gray */
+            --dark-gray: #374151; /* Medium Slate */
         }
 
         body {
             font-family: 'Inter', sans-serif;
-            background-color: #0d1117; /* Dark background */
+            background-color: var(--background-dark);
+            color: var(--text-primary);
+            transition: all 0.3s ease;
+            min-height: 100vh;
+        }
+        
+        /* Utility Classes for Smoothness */
+        .btn-smooth {
+            transition: all 0.2s ease-in-out;
+        }
+        
+        /* Header Styling */
+        header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 50;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.4);
+            background-color: rgba(17, 24, 39, 0.98); /* Less transparent background-dark */
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
         }
 
-        .gradient-text {
-            /* Clean blue/green gradient for primary text */
-            background: linear-gradient(90deg, #3b82f6 0%, #10b981 100%); 
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+        /* Search Bar Animation */
+        #search-container {
+            position: fixed; /* Use fixed to ensure it appears over content */
+            top: 64px; /* Height of the header */
+            left: 0;
+            right: 0;
+            background-color: var(--card-dark);
+            padding: 10px 16px;
+            transform: translateY(-100%);
+            opacity: 0;
+            pointer-events: none;
+            transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94), opacity 0.3s ease;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+            z-index: 40;
+            border-bottom-left-radius: 12px;
+            border-bottom-right-radius: 12px;
         }
 
-        .card-bg {
-            background-color: #1f2937; /* Slightly lighter card background */
+        #search-container.active {
+            transform: translateY(0);
+            opacity: 1;
+            pointer-events: all;
+        }
+        
+        #search-input {
+            width: 100%;
+            padding: 12px 18px;
+            border-radius: 10px;
+            border: 1px solid var(--dark-gray);
+            background-color: var(--background-dark);
+            color: var(--text-primary);
         }
 
-        .spinner {
-            border-top-color: #3b82f6;
-            animation: spin 1s linear infinite;
+        #search-input:focus {
+            outline: none;
+            border-color: var(--primary-color);
         }
 
-        @keyframes spin {
-            to { transform: rotate(360deg); }
+        /* Side Menu (Offcanvas) */
+        #side-menu {
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 100%;
+            width: 280px;
+            background-color: var(--card-dark);
+            box-shadow: 4px 0 15px rgba(0, 0, 0, 0.6);
+            transform: translateX(-100%);
+            transition: transform 0.3s ease-in-out;
+            z-index: 60;
+            padding-top: 80px;
+            overflow-y: auto;
         }
 
-        .modal-bg {
-            /* Semi-transparent dark overlay */
-            background-color: rgba(0, 0, 0, 0.9);
+        #side-menu.active {
+            transform: translateX(0);
+        }
+        
+        .menu-backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            z-index: 55;
+            display: none;
+        }
+        
+        /* Content Card Styling */
+        .content-card {
+            background-color: var(--card-dark);
+            border-radius: 16px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--dark-gray);
+            transition: transform 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+            cursor: pointer; 
         }
 
-        .modal-content-custom {
-            background-color: #0d1117;
-            border: 1px solid #374151;
+        .content-card:hover {
+            transform: translateY(-5px);
+            border-color: var(--primary-color);
+            box-shadow: 0 8px 25px rgba(74, 222, 128, 0.2); /* Accent shadow */
         }
+
+        .card-image-container {
+            position: relative;
+            padding-top: 56.25%; /* 16:9 Aspect Ratio */
+            overflow: hidden;
+        }
+
+        .card-image {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: transform 0.5s ease;
+        }
+        
+        .content-card:hover .card-image {
+            transform: scale(1.05);
+        }
+        
+        /* Category/Tag Chip Styling */
+        .chip {
+            background-color: rgba(74, 222, 128, 0.15); /* Primary color low opacity */
+            color: var(--primary-color);
+            font-weight: 600;
+        }
+        
+        .chip.active-category {
+            background-color: var(--primary-color) !important;
+            color: var(--background-dark) !important;
+            box-shadow: 0 0 8px rgba(74, 222, 128, 0.5);
+        }
+        
+        /* Primary Action Button */
+        .watch-btn {
+            /* Now handled mostly by Tailwind classes in JS, keeping base styles */
+            display: inline-block;
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: var(--background-dark);
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-weight: 800;
+            cursor: pointer;
+            text-align: center;
+            box-shadow: 0 5px 15px rgba(74, 222, 128, 0.4);
+            border: none;
+        }
+
+        .watch-btn:hover {
+            background: linear-gradient(135deg, var(--secondary-color) 0%, #16a34a 100%);
+            box-shadow: 0 8px 25px rgba(74, 222, 128, 0.6);
+        }
+        
+        /* Pagination Buttons */
+        .page-number-btn {
+            background-color: var(--dark-gray);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 8px;
+            margin: 0 4px;
+        }
+        
+        .page-number-btn.active {
+            background-color: var(--primary-color);
+            color: var(--background-dark);
+            font-weight: 800;
+        }
+        
+        .page-number-btn:hover:not(.active) {
+            background-color: #4b5563; /* Slightly lighter dark gray */
+        }
+
+        /* FAB Button */
+        #fab-scroll-top {
+            width: 50px;
+            height: 50px;
+            background-color: var(--primary-color);
+            color: var(--background-dark);
+        }
+        
+        #fab-scroll-top:hover {
+             background-color: var(--secondary-color);
+        }
+        
+        /* Media Queries for Layout */
+        @media (min-width: 640px) {
+            .content-card {
+                flex-direction: row;
+                height: 250px;
+            }
+            .card-image-container {
+                padding-top: 0;
+                min-width: 300px;
+                max-width: 300px;
+                height: 100%;
+            }
+            .card-info {
+                flex-grow: 1;
+            }
+        }
+        
+        /* Similar Content Card Styling */
+        .similar-content-card {
+            background-color: var(--background-dark);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+            cursor: pointer;
+            transition: transform 0.2s ease;
+            border: 1px solid var(--dark-gray);
+        }
+        
+        .similar-content-card:hover {
+            transform: translateY(-3px);
+            border-color: var(--primary-color);
+        }
+        
+        .similar-card-image-container {
+            position: relative;
+            padding-top: 66.66%; /* 3:2 aspect ratio for a different look */
+            overflow: hidden;
+        }
+
+        .similar-card-image {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        
+        .similar-card-info {
+            padding: 12px;
+        }
+        
+        /* MODIFICATION START: Responsive Video Player Styles */
+        .video-player-iframe-container {
+            position: relative;
+            width: 100%;
+            padding-top: 56.25%; /* 16:9 Aspect Ratio (9/16 * 100) */
+            background-color: #000; /* Black background to hide borders */
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.7);
+        }
+
+        .video-player-iframe {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+        /* MODIFICATION END: Responsive Video Player Styles */
+        
+        /* Modal Style */
+        #custom-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.85);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+        #custom-modal .modal-content {
+            background-color: var(--card-dark);
+            padding: 30px;
+            border-radius: 16px;
+            max-width: 90%;
+            width: 400px;
+            box-shadow: 0 10px 30px rgba(74, 222, 128, 0.2);
+            transform: scale(0.9);
+            opacity: 0;
+            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+        }
+        #custom-modal.show .modal-content {
+            transform: scale(1);
+            opacity: 1;
+        }
+
     </style>
 </head>
-<body class="min-h-screen p-4 sm:p-8">
-    
-    <div class="max-w-7xl mx-auto">
+<body class="min-h-screen">
+
+    <!-- Header & Navigation -->
+    <header class="h-16 flex items-center px-4 md:px-8">
+        <div class="flex-shrink-0 text-2xl font-black mr-auto" style="color: var(--primary-color);">
+            ADULT-HUB
+        </div>
         
-        <header class="text-center mb-10 pt-4 sm:pt-8">
-            <h1 class="text-6xl sm:text-7xl font-extrabold mb-2 gradient-text">
-                StreamHub
-            </h1>
-            <p class="text-xl sm:text-2xl text-gray-400 font-light">
-                Premium Streams. Zero Cost.
+        <div class="flex space-x-3 md:space-x-4">
+            
+            <!-- Search Toggle Button -->
+            <button onclick="window.toggleSearchBar()" class="p-2 w-10 h-10 md:w-12 md:h-12 bg-dark-gray hover:bg-[#4b5563] rounded-xl flex items-center justify-center btn-smooth">
+                <i class="fas fa-search text-white"></i>
+            </button>
+            
+            <!-- Menu Toggle Button -->
+            <button onclick="window.toggleSideMenu()" class="p-2 w-10 h-10 md:w-12 md:h-12 rounded-xl flex items-center justify-center btn-smooth"
+                    style="background-color: var(--primary-color);">
+                <i class="fas fa-bars text-background-dark"></i>
+            </button>
+        </div>
+    </header>
+    
+    <!-- Search Input Container (Slides down) -->
+    <div id="search-container">
+        <input type="search" id="search-input" placeholder="Search content by title or keyword..." 
+               onkeyup="if(event.key === 'Enter') { window.loadContent(1); }"
+               class="shadow-xl">
+    </div>
+
+    <!-- Side Menu (Offcanvas) -->
+    <div id="side-menu">
+        <div class="px-6 py-4">
+            
+            <!-- Logo/Close Header -->
+            <div class="flex justify-between items-center mb-6 border-b border-dark-gray pb-4">
+                <h2 class="text-2xl font-black" style="color: var(--primary-color);">Menu</h2>
+                <button onclick="window.toggleSideMenu()" class="p-2 text-xl hover:text-primary-color"><i class="fas fa-times"></i></button>
+            </div>
+            
+            <!-- Categories Section -->
+            <div class="mb-8">
+                <h2 class="text-xl font-extrabold mb-4 border-b border-dark-gray pb-2 text-primary-color">Browse by Category</h2>
+                <div id="categories-container" class="flex flex-wrap gap-2">
+                    <!-- Categories populated by JS -->
+                    <span class="text-sm text-secondary-text">Loading categories...</span>
+                </div>
+            </div>
+
+            <!-- Navigation Links -->
+            <div class="space-y-3 mb-8">
+                <h2 class="text-xl font-extrabold mb-4 border-b border-dark-gray pb-2 text-primary-color">Quick Links</h2>
+                
+                <button onclick="window.bookmarkSite();" class="w-full text-left flex items-center p-3 rounded-lg hover:bg-dark-gray btn-smooth text-lg">
+                    <i class="fas fa-bookmark w-6 text-primary-color"></i> 
+                    <span class="ml-3 font-semibold">Bookmark Site</span>
+                </button>
+                
+                <a id="telegram-link-menu" href="#" target="_blank" onclick="window.toggleSideMenu()" class="w-full text-left flex items-center p-3 rounded-lg hover:bg-dark-gray btn-smooth text-lg">
+                    <i class="fab fa-telegram-plane w-6 text-primary-color"></i> 
+                    <span class="ml-3 font-semibold">Join Telegram Channel</span>
+                </a>
+                
+                <button onclick="window.showAboutModal();" class="w-full text-left flex items-center p-3 rounded-lg hover:bg-dark-gray btn-smooth text-lg">
+                    <i class="fas fa-info-circle w-6 text-primary-color"></i> 
+                    <span class="ml-3 font-semibold">About This Hub</span>
+                </button>
+            </div>
+            
+            <!-- Footer in Menu -->
+            <p class="text-xs text-center text-secondary-text mt-10">
+                Data provided by <span class="font-bold text-primary-color">ADULT-HUB API</span>
             </p>
-        </header>
-
-        <div class="flex justify-center mb-12">
-            <div class="relative w-full max-w-2xl">
-                <input 
-                    type="text" 
-                    id="search-input" 
-                    placeholder="Search for a video, series, or tag..." 
-                    oninput="handleSearch()"
-                    class="w-full py-4 pl-12 pr-6 text-lg text-white bg-gray-800 rounded-full shadow-lg focus:ring-4 focus:ring-blue-500 focus:border-blue-500 border border-gray-700 transition duration-300"
-                >
-                <svg class="absolute left-4 top-1/2 transform -translate-y-1/2 h-6 w-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-            </div>
-        </div>
-
-        <div id="loading" class="text-center py-20 text-white transition-opacity duration-500">
-            <div class="spinner w-12 h-12 mx-auto rounded-full border-4 border-gray-700"></div>
-            <p class="mt-4 text-lg text-gray-400">Loading Content...</p>
-        </div>
-
-        <div id="content-grid" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
-            </div>
-
-        <div id="empty-state" class="text-center text-white py-20 hidden">
-            <div class="text-7xl mb-4">🤷‍♂️</div>
-            <p class="text-2xl font-semibold mb-2">Nothing matches your search.</p>
-            <p class="text-gray-400">Try broadening your search or check the recommendations below.</p>
-        </div>
-
-        <section class="mt-20">
-            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-2">
-                ⚡ Discover More
-            </h2>
-            <div id="discover-more-content" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
-                </div>
-            <div id="discover-loading" class="text-center py-10 text-white hidden">
-                <div class="spinner w-8 h-8 mx-auto rounded-full border-4 border-gray-700"></div>
-                <p class="mt-2 text-md text-gray-500">Finding recommendations...</p>
-            </div>
-        </section>
-    </div>
-
-    <div id="links-modal" class="fixed inset-0 modal-bg z-50 flex items-center justify-center p-4 hidden transition duration-300 ease-out">
-        <div class="modal-content-custom rounded-xl max-w-md w-full max-h-[90vh] overflow-y-auto p-6 relative shadow-2xl transition-all duration-300">
-            <button class="close-btn absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white w-8 h-8 rounded-full text-xl leading-none transition-transform duration-300 transform hover:rotate-90" onclick="closeLinksModal()">&times;</button>
-            <h2 class="text-3xl font-bold text-blue-400 mb-2" id="links-modal-title"></h2>
-            <p class="text-gray-400 mb-6 text-sm" id="links-modal-subtitle"></p>
-            
-            <ul class="space-y-3" id="links-list">
-                </ul>
         </div>
     </div>
+    
+    <div class="menu-backdrop" onclick="window.toggleSideMenu()"></div>
 
-    <div class="fixed bottom-6 left-6 flex flex-col space-y-3 z-40">
-        <button onclick="toggleAdminPanel()" class="bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-3 px-6 rounded-full shadow-2xl transition duration-300 transform hover:scale-105 flex items-center">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-            </svg>
-            Admin 2FA
+    <!-- Main Content Area -->
+    <div id="main-content" class="pt-20 pb-16 px-4 md:px-8">
+        
+        <!-- Status Message (for loading/errors) -->
+        <div id="status-container" class="text-center py-20 hidden" style="color: var(--primary-color);">
+            <p id="status-message" class="text-xl font-semibold">
+                <i class="fas fa-spinner fa-spin mr-2"></i> Initializing...
+            </p>
+        </div>
+        
+        <!-- Content Grid -->
+        <div id="content-grid" class="grid gap-8 md:grid-cols-1 lg:grid-cols-2 mt-2">
+            <!-- Content cards will be inserted here by JS -->
+        </div>
+
+        <!-- Pagination & Info -->
+        <div class="mt-12 flex flex-col md:flex-row items-center justify-between gap-4">
+            <p id="page-info" class="text-secondary-text font-medium text-sm">Loading...</p>
+            <div id="page-numbers-container" class="flex justify-center flex-wrap gap-2">
+                <!-- Pagination buttons generated by JS -->
+            </div>
+        </div>
+
+    </div> 
+    
+    <!-- Video Player Page (Hidden by default) -->
+    <div id="video-player-page" class="hidden pt-20 pb-16 px-4 md:px-8">
+        <!-- Back Button -->
+        <button onclick="window.showMainPage()" class="mb-6 px-4 py-2 bg-dark-gray hover:bg-[#4b5563] text-white rounded-xl font-semibold btn-smooth shadow-lg">
+            <i class="fas fa-arrow-left mr-2"></i> Back to Content
         </button>
-    </div>
-    
-    <div class="fixed bottom-6 right-6 flex flex-col space-y-3 z-40">
-        <a href="https://teluguxxx.vercel.app/" target="_blank" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-full shadow-2xl transition duration-300 transform hover:scale-105 flex items-center">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 mr-2" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21.68l-7.76-13.44h15.52L12 21.68zM12 2.32L4.24 15.76h15.52L12 2.32z"/></svg>
-            Visit Official
-        </a>
-        <a href="https://t.me/+oOdTY-zbwCY3MzA1" target="_blank" class="bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-3 px-6 rounded-full shadow-2xl transition duration-300 transform hover:scale-105 flex items-center">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 mr-2" viewBox="0 0 24 24" fill="currentColor"><path d="M18.3 5.4l-14.7 6.4c-.6.3-.6.7 0 1l3.5 1.1 9.1-5.7c.4-.3.7-.1.4.2l-7.3 6.6-1.9 4.8c-.2.6-.5.7-.9.4l-3.3-2.1c-.5-.3-.4-.5 0-.7l16.1-9.5c.6-.3.6-.6 0-.9z"/></svg>
-            Join Telegram
-        </a>
-    </div>
 
-    <div id="2fa-modal" class="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-4 hidden">
-        <div class="bg-gray-800 rounded-xl max-w-md w-full max-h-[90vh] overflow-y-auto p-6 relative border border-gray-700 shadow-2xl">
-            <button class="close-btn absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white w-8 h-8 rounded-full text-xl leading-none transition-transform duration-300 transform hover:rotate-90" onclick="close2FAModal()">&times;</button>
+        <!-- Video Title -->
+        <h1 id="video-player-title" class="text-3xl md:text-4xl font-extrabold mb-6 text-primary-color">Video Title</h1>
+
+        <!-- Video Iframe -->
+        <div class="video-player-iframe-container mb-8">
+            <iframe id="video-player-iframe" class="video-player-iframe" allowfullscreen></iframe>
+        </div>
+
+        <!-- Episode/Link Selection -->
+        <h2 class="text-2xl font-bold mb-4 border-b border-dark-gray pb-2">Links / Episodes</h2>
+        <div id="video-links" class="flex flex-wrap gap-3 mb-10">
+            <!-- Link buttons generated by JS -->
+        </div>
+        
+        <!-- Similar Content Section -->
+        <div id="similar-content-section">
+            <h2 class="text-2xl font-bold mb-4 text-primary-color border-b border-dark-gray pb-2">More Like This</h2>
             
-            <h2 class="text-3xl font-bold text-blue-400 mb-6 text-center">🔐 Admin 2FA Setup</h2>
+            <div id="similar-content-loading" class="text-center py-6 hidden" style="color: var(--primary-color);">
+                <i class="fas fa-spinner fa-spin mr-2"></i> Loading similar content...
+            </div>
             
-            <div class="mb-6">
-                <h3 class="text-xl font-bold mb-3 text-white">Step 1: Generate QR Code</h3>
-                <button onclick="setup2FA()" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-lg transition duration-300">
-                    Generate QR Code for Google Authenticator
-                </button>
-                <div id="qr-container" class="mt-4 hidden text-center">
-                    <img id="qr-image" class="mx-auto border-4 border-white rounded-lg max-w-xs">
-                    <p id="secret-text" class="text-yellow-400 mt-3 text-sm font-mono bg-gray-900 p-2 rounded"></p>
-                    <p class="text-gray-400 text-sm mt-2">Scan with Google Authenticator app or enter the secret manually</p>
-                </div>
+            <div id="similar-content-grid" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
+                <!-- Similar content cards will be inserted here by JS -->
             </div>
+            
+            <!-- Load More Button (Created in JS and appended here) -->
+        </div>
+    </div>
 
-            <div class="mb-6">
-                <h3 class="text-xl font-bold mb-3 text-white">Step 2: Verify Setup</h3>
-                <div class="flex space-x-2">
-                    <input type="text" id="verify-code" placeholder="Enter 6-digit code" 
-                            class="flex-1 bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-600 focus:border-green-500 focus:ring-2 focus:ring-green-500">
-                    <button onclick="verify2FA()" class="bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded-lg transition duration-300">
-                        Verify
-                    </button>
-                </div>
-                <div id="verify-result" class="mt-2"></div>
+    <!-- Custom Modal Structure -->
+    <div id="custom-modal">
+        <div class="modal-content text-center">
+            <div id="modal-message" class="text-lg">
+                <!-- Message content -->
             </div>
-
-            <div class="mb-6">
-                <h3 class="text-xl font-bold mb-3 text-white">Step 3: Test Protected Access</h3>
-                <div class="flex space-x-2">
-                    <input type="text" id="test-code" placeholder="Enter 6-digit code" 
-                            class="flex-1 bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-600 focus:border-purple-500 focus:ring-2 focus:ring-purple-500">
-                    <button onclick="testProtected()" class="bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded-lg transition duration-300">
-                        Test
-                    </button>
-                </div>
-                <div id="test-result" class="mt-2"></div>
-            </div>
-
-            <div class="text-center pt-4 border-t border-gray-700">
-                <button onclick="check2FAStatus()" class="bg-gray-600 hover:bg-gray-700 text-white py-2 px-4 rounded-lg transition duration-300 text-sm">
-                    Check 2FA Status
-                </button>
-                <div id="status-result" class="mt-2"></div>
+            <div id="modal-buttons" class="mt-6 grid grid-cols-2 gap-4">
+                <!-- Buttons will be inserted here by JS -->
             </div>
         </div>
     </div>
     
-    <script>
-        // --- SECURITY/ANTI-INSPECTION LOGIC (UNCHANGED) ---
-        const TELEGRAM_URL = "https://t.me/+oOdTY-zbwCY3MzA1";
-        
-        function redirectTelegram() {
-            window.location.href = TELEGRAM_URL;
-        }
+    <!-- Scroll To Top FAB -->
+    <button id="fab-scroll-top" 
+            onclick="window.scrollToTop()"
+            class="fixed bottom-6 right-6 p-3 rounded-full flex items-center justify-center font-size-1-5rem shadow-2xl z-100 cursor-pointer btn-smooth"
+            style="display: none;">
+        <i class="fas fa-arrow-up"></i>
+    </button>
+    
+    <!-- Footer -->
+    <footer class="bg-card-dark py-6 text-center text-sm text-secondary-text border-t border-[#374151]">
+        <p>&copy; 2024 Adult Hub | All Rights Reserved. | <a id="footer-telegram-link" href="#" target="_blank" class="text-primary-color hover:underline">Join Telegram</a></p>
+    </footer>
 
-        document.addEventListener('contextmenu', function(e) {
-            e.preventDefault();
-            redirectTelegram();
-        });
-
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'F12') {
-                e.preventDefault();
-                redirectTelegram();
-            }
-            if (e.ctrlKey || e.metaKey) { 
-                const key = e.key.toLowerCase();
-                if ((e.shiftKey && (key === 'i' || key === 'j' || key === 'c')) || key === 'u') {
-                    e.preventDefault();
-                    redirectTelegram();
-                }
-            }
-        });
-
-        // --- APPLICATION LOGIC ---
-        let allContent = [];
-        
-        // !!! IMPORTANT: REPLACE THIS PLACEHOLDER WITH YOUR KOYEB/BACKEND APP URL !!!
-        const API_BASE_URL = 'https://confident-jemima-school1660440-5a325843.koyeb.app'; 
-        
-        const API_URL = API_BASE_URL + '/api/content';
-        const SIMILAR_API_URL = API_BASE_URL + '/api/content/similar/';
-        
-        const loadingElement = document.getElementById('loading');
-        const grid = document.getElementById('content-grid');
-        const emptyState = document.getElementById('empty-state');
-        const discoverGrid = document.getElementById('discover-more-content');
-        const discoverLoading = document.getElementById('discover-loading');
-
-        /**
-         * Fetches all content from the API.
-         */
-        async function fetchContent() {
-            if (API_BASE_URL === 'YOUR_KOYEB_API_URL') {
-                showEmptyState("Configuration Error", "Please update API_BASE_URL in the JavaScript with your actual backend URL.");
-                return;
-            }
-            
-            loadingElement.classList.remove('hidden');
-            try {
-                const response = await fetch(API_URL);
-                const result = await response.json();
-                
-                if (result.success && Array.isArray(result.data)) {
-                    allContent = result.data;
-                    displayContent();
-                    if (allContent.length > 0 && allContent[0].tags && allContent[0].tags.length > 0) {
-                        fetchSimilarContent(allContent[0].tags.join(','));
-                    }
-                } else {
-                    showEmptyState("No content available yet.", "Use the Telegram bot to add your first video or series!");
-                }
-            } catch (error) {
-                console.error('Error fetching content:', error);
-                showEmptyState("Failed to load content.", "Check your API_BASE_URL configuration or backend status.");
-            } finally {
-                loadingElement.classList.add('hidden');
-            }
-        }
-
-        /**
-         * Tracks a view for a given content ID.
-         */
-        async function trackView(contentId) {
-            try {
-                await fetch(API_BASE_URL + '/api/track-view', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ content_id: contentId })
-                });
-            } catch (error) {
-                console.error('Error tracking view:', error);
-            }
-        }
-        
-        /**
-         * Renders content cards in a specified container.
-         * Now includes a view count badge.
-         */
-        function renderContentCards(contentArray, container) {
-            container.innerHTML = contentArray.map(item => {
-                const typeClass = item.type === 'Video' 
-                    ? 'bg-red-600' 
-                    : 'bg-green-500';
-                
-                const fallbackImage = 'https://placehold.co/280x400/1f2937/d1d5db?text=' + encodeURIComponent(item.title || 'No Title');
-                const linksText = `${item.links.length} ${item.links.length === 1 ? 'Link' : 'Links'}`;
-                const views = item.views || 0; // Get views from the item data
-
-                return `
-                    <div class="content-card card-bg rounded-xl shadow-lg hover:shadow-2xl transform hover:-translate-y-1 transition duration-300 cursor-pointer group border border-gray-700 overflow-hidden" onclick="handleCardClick('${item._id}', '${item.type}')">
-                        <div class="relative">
-                            <img class="w-full h-64 object-cover transition-opacity duration-300 group-hover:opacity-80" 
-                                 src="${item.thumbnail_url}" 
-                                 alt="${item.title}"
-                                 onerror="this.onerror=null;this.src='${fallbackImage}';">
-                            
-                            <span class="absolute bottom-2 left-2 px-3 py-1 text-xs font-semibold text-white rounded-full ${typeClass} shadow-md">
-                                ${item.type}
-                            </span>
-                            
-                            <div class="absolute top-2 right-2 bg-black bg-opacity-70 text-white px-2 py-1 rounded-full text-xs flex items-center">
-                                <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
-                                    <path d="M10 12a2 2 0 100-4 2 2 0 000 4z"/>
-                                    <path fill-rule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd"/>
-                                </svg>
-                                ${views}
-                            </div>
-                        </div>
-                        <div class="p-4">
-                            <h3 class="text-lg font-bold text-white mb-1 truncate">${item.title}</h3>
-                            <p class="text-gray-400 text-sm mb-3">
-                                ${linksText}
-                            </p>
-                            <button class="w-full py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition duration-300 shadow-md">
-                                Watch Stream
-                            </button>
-                        </div>
-                    </div>
-                `;
-            }).join('');
-        }
-
-
-        /**
-         * Handles the click action on a content card based on content type.
-         */
-        function handleCardClick(contentId, contentType) {
-            const content = allContent.find(item => item._id === contentId);
-            if (!content || content.links.length === 0) {
-                console.error("No streaming links found for this content.");
-                return;
-            }
-            
-            // Track the view before proceeding
-            trackView(contentId);
-
-            if (contentType === 'Video' && content.links.length === 1) {
-                // Direct navigation for single-link content (Video)
-                window.location.href = content.links[0].url;
-            } else {
-                // Open selection modal for multi-link content (Series)
-                openLinksModal(content);
-            }
-        }
-
-
-        /**
-         * Filters content based on the search input and renders the main grid.
-         */
-        function displayContent() {
-            const searchTerm = document.getElementById('search-input').value.toLowerCase().trim();
-            
-            const filteredContent = allContent.filter(item => {
-                const titleMatch = item.title && item.title.toLowerCase().includes(searchTerm);
-                const tagMatch = item.tags && item.tags.some(tag => tag.includes(searchTerm));
-                return titleMatch || tagMatch;
-            });
-
-            if (filteredContent.length === 0) {
-                renderContentCards([], grid);
-                emptyState.classList.remove('hidden');
-                return;
-            }
-
-            emptyState.classList.add('hidden');
-            renderContentCards(filteredContent, grid);
-        }
-
-        let searchTimeout;
-        function handleSearch() {
-            clearTimeout(searchTimeout);
-            searchTimeout = setTimeout(() => {
-                displayContent();
-            }, 300); 
-        }
-
-        function showEmptyState(title, subtitle) {
-            grid.innerHTML = '';
-            document.getElementById('empty-state').querySelector('p:nth-child(2)').textContent = title;
-            document.getElementById('empty-state').querySelector('p:nth-child(3)').textContent = subtitle;
-            emptyState.classList.remove('hidden');
-        }
-
-
-        /**
-         * Opens the Links Modal for selection.
-         */
-        function openLinksModal(content) {
-            document.getElementById('links-modal-title').textContent = content.title;
-            document.getElementById('links-modal-subtitle').textContent = `Select an episode or stream:`;
-            
-            const linksList = document.getElementById('links-list');
-            
-            linksList.innerHTML = content.links.map(link => `
-                <li class="link-item">
-                    <button onclick="window.location.href='${link.url}'" 
-                            class="block w-full py-3 px-4 bg-gray-800 text-white font-medium rounded-lg hover:bg-green-600 transition duration-300 text-left shadow-md">
-                        <span class="text-blue-400 font-bold">${link.episode_title}</span> 
-                        </button>
-                </li>
-            `).join('');
-
-            document.getElementById('links-modal').classList.remove('hidden');
-            document.getElementById('links-modal').classList.add('flex');
-        }
-
-        /**
-         * Closes the Links Modal.
-         */
-        function closeLinksModal() {
-            document.getElementById('links-modal').classList.add('hidden');
-            document.getElementById('links-modal').classList.remove('flex');
-        }
-        
-        /**
-         * Fetches and displays similar content based on tags.
-         */
-        async function fetchSimilarContent(tagsString) {
-            const tags = tagsString.split(',').map(t => t.trim()).filter(t => t.length > 0);
-            if (tags.length === 0) {
-                 discoverGrid.innerHTML = '<p class="text-gray-500 col-span-5 text-center">No relevant tags for discovery.</p>';
-                 return;
-            }
-
-            discoverLoading.classList.remove('hidden');
-            discoverGrid.innerHTML = '';
-            
-            try {
-                // Fetch up to 10 similar items
-                const response = await fetch(SIMILAR_API_URL + tags.join(','));
-                const result = await response.json();
-
-                if (result.success && Array.isArray(result.data) && result.data.length > 0) {
-                    // Show top 5 recommendations
-                    const uniqueContent = result.data.slice(0, 5); 
-                    renderContentCards(uniqueContent, discoverGrid);
-                } else {
-                    discoverGrid.innerHTML = '<p class="text-gray-500 col-span-5 text-center">No similar items found for these tags.</p>';
-                }
-
-            } catch (error) {
-                console.error('Error fetching similar content:', error);
-                discoverGrid.innerHTML = '<p class="text-red-500 col-span-5 text-center">Failed to load recommendations.</p>';
-            } finally {
-                discoverLoading.classList.add('hidden');
-            }
-        }
-
-        // ------------------------------------
-        // --- NEW 2FA ADMIN PANEL FUNCTIONS ---
-        // ------------------------------------
-
-        /**
-         * Toggles the visibility of the new 2FA setup modal.
-         */
-        function toggleAdminPanel() {
-            document.getElementById('2fa-modal').classList.toggle('hidden');
-            document.getElementById('2fa-modal').classList.toggle('flex');
-            check2FAStatus(); // Check status whenever the modal is opened
-        }
-
-        /**
-         * Closes the new 2FA setup modal.
-         */
-        function close2FAModal() {
-            document.getElementById('2fa-modal').classList.add('hidden');
-            document.getElementById('2fa-modal').classList.remove('flex');
-        }
-        
-        /**
-         * Sends a request to the backend to generate the 2FA QR code and secret.
-         */
-        async function setup2FA() {
-            try {
-                const response = await fetch(API_BASE_URL + '/api/auth/2fa-setup', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        username: 'admin',
-                        password: 'admin123' // NOTE: Hardcoded password should be handled securely in a real app
-                    })
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok && data.success) { 
-                    document.getElementById('qr-image').src = data.qr_code;
-                    document.getElementById('secret-text').textContent = 'Secret: ' + data.secret;
-                    document.getElementById('qr-container').classList.remove('hidden');
-                    
-                    showMessage('QR code generated successfully! Scan it with Google Authenticator.', 'success');
-                } else {
-                    showMessage('Error: ' + (data.error || 'Setup failed.'), 'error');
-                }
-            } catch (error) {
-                console.error('Setup error:', error);
-                showMessage('Setup failed: ' + error.message, 'error');
-            }
-        }
-
-        /**
-         * Verifies the 2FA setup with a code from the authenticator app.
-         */
-        async function verify2FA() {
-            const code = document.getElementById('verify-code').value.trim();
-            if (!code || code.length !== 6) {
-                showMessage('Please enter a valid 6-digit code', 'error');
-                return;
-            }
-
-            try {
-                const response = await fetch(API_BASE_URL + '/api/auth/verify-2fa', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        username: 'admin',
-                        token: code
-                    })
-                });
-                
-                const data = await response.json();
-                const resultDiv = document.getElementById('verify-result');
-                
-                if (response.ok && data.success) {
-                    resultDiv.innerHTML = '<p class="text-green-400 text-center">✅ 2FA Verified Successfully!</p>';
-                    showMessage('2FA setup completed! You can now use codes from Google Authenticator.', 'success');
-                } else {
-                    resultDiv.innerHTML = '<p class="text-red-400 text-center">❌ ' + (data.error || 'Invalid code.') + '</p>';
-                }
-            } catch (error) {
-                console.error('Verify error:', error);
-                showMessage('Verification failed: ' + error.message, 'error');
-            }
-        }
-
-        /**
-         * Tests access to a protected route using the 2FA code as a Bearer token.
-         */
-        async function testProtected() {
-            const code = document.getElementById('test-code').value.trim();
-            if (!code || code.length !== 6) {
-                showMessage('Please enter a valid 6-digit code', 'error');
-                return;
-            }
-
-            try {
-                const response = await fetch(API_BASE_URL + '/api/auth/protected-test', {
-                    method: 'GET',
-                    headers: {
-                        'Authorization': 'Bearer ' + code
-                    }
-                });
-                
-                const data = await response.json();
-                const resultDiv = document.getElementById('test-result');
-                
-                if (response.ok) {
-                    resultDiv.innerHTML = '<p class="text-green-400 text-center">✅ Access Granted!</p>';
-                } else {
-                    resultDiv.innerHTML = '<p class="text-red-400 text-center">❌ ' + (data.error || 'Access Denied.') + '</p>';
-                }
-            } catch (error) {
-                console.error('Test error:', error);
-                showMessage('Test failed: ' + error.message, 'error');
-            }
-        }
-
-        /**
-         * Checks the current 2FA status on the backend.
-         */
-        async function check2FAStatus() {
-            try {
-                const response = await fetch(API_BASE_URL + '/api/auth/status');
-                const data = await response.json();
-                const statusDiv = document.getElementById('status-result');
-                
-                if (data.success) {
-                    if (data.is_2fa_enabled) {
-                        statusDiv.innerHTML = '<p class="text-green-400 text-center">✅ 2FA is Enabled</p>';
-                    } else {
-                        statusDiv.innerHTML = '<p class="text-yellow-400 text-center">⚠️ 2FA Not Setup</p>';
-                    }
-                }
-            } catch (error) {
-                console.error('Status check failed:', error);
-                document.getElementById('status-result').innerHTML = '<p class="text-red-400 text-center">❌ Status check failed.</p>';
-            }
-        }
-
-        /**
-         * Displays a toast notification message.
-         */
-        function showMessage(message, type) {
-            // Create toast notification
-            const toast = document.createElement('div');
-            toast.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 transition-transform duration-300 transform translate-x-full ${
-                type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
-            }`;
-            toast.textContent = message;
-            
-            document.body.appendChild(toast);
-            
-            // Animate in
-            setTimeout(() => {
-                toast.classList.remove('translate-x-full');
-            }, 100);
-            
-            // Remove after 5 seconds
-            setTimeout(() => {
-                toast.classList.add('translate-x-full');
-                setTimeout(() => {
-                    document.body.removeChild(toast);
-                }, 300);
-            }, 5000);
-        }
-
-        // Close modal on outside click
-        document.getElementById('2fa-modal').addEventListener('click', (e) => {
-            if (e.target.id === '2fa-modal') close2FAModal();
-        });
-
-        // Universal Escape key listener for the modal
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                if (!document.getElementById('links-modal').classList.contains('hidden')) {
-                    closeLinksModal();
-                }
-                if (!document.getElementById('2fa-modal').classList.contains('hidden')) {
-                    close2FAModal();
-                }
-            }
-        });
-
-        // Close modal on outside click
-        document.getElementById('links-modal').addEventListener('click', (e) => {
-            if (e.target.id === 'links-modal') closeLinksModal();
-        });
-
-        // Load content on page load
-        fetchContent();
-    </script>
+    <!-- JavaScript Logic -->
+    <script src="script.js"></script>
 </body>
 </html>
