@@ -159,7 +159,7 @@ GROUP_WELCOME_SENT = set() # To track users welcomed in the group
 START_KEYBOARD = {
     'keyboard': [
         [{'text': '/add'}, {'text': '/edit'}, {'text': '/delete'}, {'text': '/files'}], 
-        [{'text': '/cancel'}]
+        [{'text': '/post'}, {'text': '/cancel'}] # Added /post button
     ],
     'resize_keyboard': True,
     'one_time_keyboard': False
@@ -203,6 +203,28 @@ def update_content(content_id, update_data):
         logger.error(f"MongoDB Update Error: {e}")
         return False
 
+def get_random_content(limit=5):
+    """Fetches a specified number of random content items from MongoDB."""
+    if content_collection is None:
+        logger.error("MongoDB collection not available for random content fetch.")
+        return []
+    try:
+        # Use the $sample aggregation stage for efficient random document selection
+        pipeline = [{"$sample": {"size": limit}}]
+        
+        random_docs = list(content_collection.aggregate(pipeline))
+        
+        # Format the documents to include necessary fields
+        result = []
+        for doc in random_docs:
+            # Ensure the _id is converted to a string for consistency
+            doc['_id'] = str(doc['_id']) 
+            result.append(doc)
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching random content: {e}")
+        return []
+
 def send_message(chat_id, text, reply_markup=None):
     """Sends a message back to the user with timeout."""
     if not TELEGRAM_API:
@@ -237,7 +259,7 @@ def send_group_notification(title, thumbnail_url, content_id):
         logger.warning("Telegram bot or group ID not configured for notification.")
         return
 
-    # UPDATED: Set the content_link to the base ACCESS_URL only
+    # Set the content_link to the base ACCESS_URL only
     content_link = f"https://{ACCESS_URL}"
     
     # 1. Caption text (displaying only the base URL for branding)
@@ -267,7 +289,7 @@ def send_group_notification(title, thumbnail_url, content_id):
     try:
         response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
-        logger.info(f"New content notification sent to group {GROUP_TELEGRAM_ID} with button.")
+        logger.info(f"New content notification sent to group {GROUP_TELEGRAM_ID} with button for content ID {content_id}.")
     except requests.exceptions.RequestException as e:
         logger.warning(f"Error sending group notification (sendPhoto failed): {e}")
         
@@ -643,10 +665,44 @@ def webhook():
             except Exception as e:
                 logger.error(f"Error fetching files list: {e}")
                 send_message(chat_id, "❌ An error occurred while fetching the file list.")
+        
+        # 5. POST RANDOM CONTENT COMMAND (NEW FEATURE)
+        elif text.startswith('/post'):
+            if content_collection is None:
+                send_message(chat_id, "❌ Database is currently unavailable.")
+                return jsonify({"status": "ok"}), 200
+
+            # Inform user that the process has started
+            send_message(chat_id, "⌛ Fetching 5 random items and initiating posts to the group...")
+            
+            try:
+                random_items = get_random_content(5)
                 
+                if not random_items:
+                    send_message(chat_id, "❌ No content found in the database to post.", START_KEYBOARD)
+                    return jsonify({"status": "ok"}), 200
+
+                posted_count = 0
+                for item in random_items:
+                    # Use threading to prevent the webhook from timing out while posting multiple times
+                    # This ensures the bot can handle sending 5 separate photos quickly.
+                    threading.Thread(
+                        target=send_group_notification, 
+                        args=(item.get('title', 'Untitled Content'), item.get('thumbnail_url', 'http://example.com/placeholder.png'), item['_id'])
+                    ).start()
+                    posted_count += 1
+                    
+                send_message(chat_id, f"✅ **Success!** Initiated posting of {posted_count} random content items to the group. Check the group for updates.", START_KEYBOARD)
+
+            except Exception as e:
+                logger.error(f"Error handling /post command: {e}")
+                send_message(chat_id, "❌ An error occurred while trying to post content.", START_KEYBOARD)
+                
+            return jsonify({"status": "ok"}), 200
+
         # --- Multi-step Input Handlers ---
         
-        # 5. BROADCAST FLOW HANDLER
+        # 6. BROADCAST FLOW HANDLER
         elif user_state['step'] == 'broadcast_message':
             broadcast_text = text
             send_message(GROUP_TELEGRAM_ID, f"📢 **ADMIN ANNOUNCEMENT**:\n\n{broadcast_text}")
@@ -684,11 +740,11 @@ def webhook():
                 content_id = save_content(user_state['data'])
                 if content_id:
                     # NEW: Auto-forward notification to group with button
-                    send_group_notification(
-                        user_state['data']['title'], 
-                        user_state['data']['thumbnail_url'], 
-                        content_id
-                    )
+                    # Running this in a thread too to not delay the immediate response back to the admin
+                    threading.Thread(
+                        target=send_group_notification,
+                        args=(user_state['data']['title'], user_state['data']['thumbnail_url'], content_id)
+                    ).start()
                     
                     # NOTE: This link shown to the admin in private chat still includes the ID for convenience
                     send_message(chat_id, 
@@ -788,6 +844,7 @@ def webhook():
                         logger.info(f"LULUVID Edit modification: {text} -> {modified_link_text}")
 
                 try:
+                    # Attempt to parse as JSON list of links
                     links = json.loads(modified_link_text)
                     if not isinstance(links, list): raise ValueError
                     update_data['links'] = links
@@ -840,7 +897,8 @@ def flush_view_cache():
     """Periodically flush view count cache to database."""
     global view_count_cache 
     while True:
-        time.sleep(30)
+        # NOTE: Reduced sleep time from original to be more aggressive on view updates
+        time.sleep(15) 
         try:
             with cache_lock:
                 if not view_count_cache:
