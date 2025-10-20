@@ -65,6 +65,7 @@ def init_mongodb():
         content_collection.create_index([("created_at", -1)])
         content_collection.create_index([("tags", 1)])
         content_collection.create_index([("views", -1)])
+        content_collection.create_index([("category", 1)]) # ADDED: Index for new category field
         
         logger.info(f"MongoDB connected with connection pooling. Database: {db_name}")
         return True
@@ -159,7 +160,7 @@ GROUP_WELCOME_SENT = set() # To track users welcomed in the group
 START_KEYBOARD = {
     'keyboard': [
         [{'text': '/add'}, {'text': '/edit'}, {'text': '/delete'}, {'text': '/files'}], 
-        [{'text': '/post'}, {'text': '/cancel'}] # Added /post button
+        [{'text': '/post'}, {'text': '/broadcast'}, {'text': '/cancel'}] # Added /post and /broadcast buttons
     ],
     'resize_keyboard': True,
     'one_time_keyboard': False
@@ -310,6 +311,7 @@ def save_content(content_data):
         document = {
             "title": content_data.get('title'),
             "type": content_data.get('type'),
+            "category": content_data.get('category'), # ADDED: New field
             "thumbnail_url": content_data.get('thumbnail_url'),
             "tags": [t.strip().lower() for t in content_data.get('tags', '').split(',') if t.strip()],
             "links": content_data.get('links', []),
@@ -383,7 +385,7 @@ def track_view():
 def get_content():
     """
     Fast content retrieval with pagination, caching, and flexible search.
-    Supports 'type', 'tag', and the new 'q' (query) parameter for search.
+    Supports 'type', 'tag', 'category' and the new 'q' (query) parameter for search.
     """
     if content_collection is None:
         return jsonify({"error": "Database not configured."}), 503
@@ -396,6 +398,9 @@ def get_content():
         content_type = request.args.get('type')
         tag_filter = request.args.get('tag')
         
+        # ADDED: New category filter parameter
+        category_filter = request.args.get('category') 
+        
         # New flexible search parameter
         search_query = request.args.get('q') 
         
@@ -403,6 +408,9 @@ def get_content():
         
         if content_type:
             query['type'] = content_type
+            
+        if category_filter:
+            query['category'] = category_filter # ADDED: Category filter
             
         if tag_filter:
             # Traditional exact tag search (for backward compatibility)
@@ -415,16 +423,17 @@ def get_content():
                 
             search_regex = {"$regex": search_query, "$options": "i"} # Case-insensitive regex
             
-            # Use $or to search across 'title' OR 'tags'
+            # Use $or to search across 'title' OR 'tags' OR 'category'
             query['$or'] = [
                 {"title": search_regex},
-                {"tags": search_regex}
+                {"tags": search_regex},
+                {"category": search_regex} # ADDED: Search by category too
             ]
 
         # --- END FLEXIBLE SEARCH ---
         
         projection = {
-            'title': 1, 'type': 1, 'thumbnail_url': 1, 'tags': 1, 
+            'title': 1, 'type': 1, 'category': 1, 'thumbnail_url': 1, 'tags': 1, # ADDED: category to projection
             'views': 1, 'created_at': 1, 'links': 1
         }
         
@@ -666,26 +675,36 @@ def webhook():
                 logger.error(f"Error fetching files list: {e}")
                 send_message(chat_id, "❌ An error occurred while fetching the file list.")
         
-        # 5. POST RANDOM CONTENT COMMAND (NEW FEATURE)
+        # 5. POST RANDOM CONTENT COMMAND (MODIFIED FEATURE)
         elif text.startswith('/post'):
             if content_collection is None:
                 send_message(chat_id, "❌ Database is currently unavailable.")
                 return jsonify({"status": "ok"}), 200
 
-            # Inform user that the process has started
-            send_message(chat_id, "⌛ Fetching 5 random items and initiating posts to the group...")
-            
             try:
-                random_items = get_random_content(5)
+                # 1. Calculate the dynamic post limit
+                total_content = content_collection.count_documents({})
+                
+                if total_content == 0:
+                    send_message(chat_id, "❌ No content found in the database to post.", START_KEYBOARD)
+                    return jsonify({"status": "ok"}), 200
+                    
+                # Calculate the limit: 1/5th of total, capped at 5 and floored at 1.
+                calculated_limit = total_content // 5
+                post_limit = max(1, min(5, calculated_limit)) # Dynamic limit logic
+                
+                # Inform user about the determined limit
+                send_message(chat_id, f"⌛ Total Content: {total_content}. Fetching **{post_limit}** random items and initiating posts to the group...")
+
+                random_items = get_random_content(post_limit) # Use the dynamic limit
                 
                 if not random_items:
-                    send_message(chat_id, "❌ No content found in the database to post.", START_KEYBOARD)
+                    send_message(chat_id, "❌ No content found in the database to post (check count).", START_KEYBOARD)
                     return jsonify({"status": "ok"}), 200
 
                 posted_count = 0
                 for item in random_items:
                     # Use threading to prevent the webhook from timing out while posting multiple times
-                    # This ensures the bot can handle sending 5 separate photos quickly.
                     threading.Thread(
                         target=send_group_notification, 
                         args=(item.get('title', 'Untitled Content'), item.get('thumbnail_url', 'http://example.com/placeholder.png'), item['_id'])
@@ -716,8 +735,13 @@ def webhook():
             
         elif user_state['step'] == 'add_type':
             user_state['data']['type'] = text
+            user_state['step'] = 'add_category' # MODIFIED STEP
+            send_message(chat_id, "✅ Type saved. Now send the **Category** (e.g., `Hindi` or `Brazzers`).") # ADDED CATEGORY STEP
+            
+        elif user_state['step'] == 'add_category': # NEW STEP
+            user_state['data']['category'] = text
             user_state['step'] = 'add_thumbnail'
-            send_message(chat_id, "✅ Type saved. Now send the **Thumbnail URL**.")
+            send_message(chat_id, "✅ Category saved. Now send the **Thumbnail URL**.")
             
         elif user_state['step'] == 'add_thumbnail':
             user_state['data']['thumbnail_url'] = text
@@ -796,14 +820,15 @@ def webhook():
                 user_state['data']['_id'] = content_id
                 user_state['step'] = 'edit_field'
                 
-                edit_fields = ['Title', 'Type', 'Thumbnail URL', 'Tags', 'Links']
+                edit_fields = ['Title', 'Type', 'Category', 'Thumbnail URL', 'Tags', 'Links'] # ADDED Category
                 keyboard_buttons = [[{'text': f'/edit_{f.lower().replace(" ", "_")}'}] for f in edit_fields]
                 keyboard_buttons.append([{'text': '/cancel'}])
 
                 info_text = (
                     f"📝 **Editing Content ID**: `{content_id}`\n\n"
                     f"**Current Title**: {content_doc.get('title', 'N/A')}\n"
-                    f"**Current Type**: {content_doc.get('type', 'N/A')}\n\n"
+                    f"**Current Type**: {content_doc.get('type', 'N/A')}\n"
+                    f"**Current Category**: {content_doc.get('category', 'N/A')}\n\n" # Displayed Category
                     "Please select a field to update:"
                 )
                 
@@ -830,6 +855,8 @@ def webhook():
             update_data = {}
             if field == 'tags':
                 update_data['tags'] = [t.strip().lower() for t in text.split(',') if t.strip()]
+            elif field == 'category': # NEW HANDLER
+                update_data['category'] = text
             elif field == 'links':
                 modified_link_text = text
                 
@@ -862,7 +889,7 @@ def webhook():
             if update_content(content_id, update_data):
                 send_message(chat_id, f"✅ **Success!** {field.replace('_', ' ').title()} for ID `{content_id}` updated.", START_KEYBOARD)
             else:
-                send_message(chat_id, "❌ **Update Failed.** Content not found or error occurred.", START_KEYBOARD)
+                send_message(chat_id, "❌ **Update Failed.** Content not found or no changes made.", START_KEYBOARD)
 
             USER_STATE[chat_id] = {'step': 'main'}
 
