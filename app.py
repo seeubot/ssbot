@@ -595,6 +595,11 @@ def webhook():
         user_id = message['from']['id'] # Get the user's ID
         user_state = USER_STATE.get(chat_id, {'step': 'main'})
         
+        # NOTE ON CONTENT PROTECTION:
+        # Blocking users from forwarding content in the group must be configured 
+        # using Telegram's "Restrict Saving Content" feature in the channel/group settings, 
+        # as this cannot be enforced via bot code.
+
         # 1. GROUP WELCOME MESSAGE (Automatic)
         if chat_id == GROUP_TELEGRAM_ID and 'new_chat_members' in message:
             for member in message['new_chat_members']:
@@ -618,7 +623,7 @@ def webhook():
             return jsonify({"status": "unauthorized"}), 200
         
         # --- NEW 3. FILE FORWARDING LOGIC (Admin Private Chat Only) ---
-        # Check if the message contains any media/file fields
+        # This logic is for the admin to SUBMIT a file to the content channel.
         has_media = any(key in message for key in ['photo', 'video', 'document', 'audio', 'sticker', 'animation', 'voice'])
         
         if chat_id > 0 and user_id == ADMIN_TELEGRAM_ID and has_media:
