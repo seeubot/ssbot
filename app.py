@@ -647,10 +647,8 @@ def webhook():
             # 1. Get the next sequence number for the post
             sequence_number = get_next_sequence_value("content_post_sequence")
             
-            # 2. Extract original caption and create the new numbered caption
-            original_caption = message.get('caption', '')
-            # Prepend the sequence number in bold
-            new_caption = f"**#{sequence_number}**\n\n{original_caption}"
+            # 2. CREATE NEW CAPTION: Remove original text/links, use only number and product name
+            new_caption = f"**#{sequence_number}**\n\n{PRODUCT_NAME}"
 
             # 3. Use copyMessage to hide the 'Forwarded from' tag and send the numbered content
             url = TELEGRAM_API + "copyMessage"
