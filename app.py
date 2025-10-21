@@ -15,7 +15,8 @@ import pymongo.operations
 
 # --- CONSTANTS & CONFIGURATION ---
 ADMIN_TELEGRAM_ID = 1352497419  # User's specified admin ID for Telegram commands
-GROUP_TELEGRAM_ID = -1002541647242 # User's specified target group ID
+GROUP_TELEGRAM_ID = -1002541647242 # User's specified target group ID for notifications
+CONTENT_FORWARD_CHANNEL_ID = -1002776780769 # NEW: ID for forwarding uploaded/sent files
 PRODUCT_NAME = "Adult-Hub"
 ACCESS_URL = "teluguxx.vercel.app"
 
@@ -65,7 +66,7 @@ def init_mongodb():
         content_collection.create_index([("created_at", -1)])
         content_collection.create_index([("tags", 1)])
         content_collection.create_index([("views", -1)])
-        content_collection.create_index([("category", 1)]) # ADDED: Index for new category field
+        content_collection.create_index([("category", 1)]) 
         
         logger.info(f"MongoDB connected with connection pooling. Database: {db_name}")
         return True
@@ -160,7 +161,7 @@ GROUP_WELCOME_SENT = set() # To track users welcomed in the group
 START_KEYBOARD = {
     'keyboard': [
         [{'text': '/add'}, {'text': '/edit'}, {'text': '/delete'}, {'text': '/files'}], 
-        [{'text': '/post'}, {'text': '/broadcast'}, {'text': '/cancel'}] # Added /post and /broadcast buttons
+        [{'text': '/post'}, {'text': '/broadcast'}, {'text': '/cancel'}] 
     ],
     'resize_keyboard': True,
     'one_time_keyboard': False
@@ -311,7 +312,7 @@ def save_content(content_data):
         document = {
             "title": content_data.get('title'),
             "type": content_data.get('type'),
-            "category": content_data.get('category'), # ADDED: New field
+            "category": content_data.get('category'), 
             "thumbnail_url": content_data.get('thumbnail_url'),
             "tags": [t.strip().lower() for t in content_data.get('tags', '').split(',') if t.strip()],
             "links": content_data.get('links', []),
@@ -410,7 +411,7 @@ def get_content():
             query['type'] = content_type
             
         if category_filter:
-            query['category'] = category_filter # ADDED: Category filter
+            query['category'] = category_filter 
             
         if tag_filter:
             # Traditional exact tag search (for backward compatibility)
@@ -427,13 +428,13 @@ def get_content():
             query['$or'] = [
                 {"title": search_regex},
                 {"tags": search_regex},
-                {"category": search_regex} # ADDED: Search by category too
+                {"category": search_regex} 
             ]
 
         # --- END FLEXIBLE SEARCH ---
         
         projection = {
-            'title': 1, 'type': 1, 'category': 1, 'thumbnail_url': 1, 'tags': 1, # ADDED: category to projection
+            'title': 1, 'type': 1, 'category': 1, 'thumbnail_url': 1, 'tags': 1, 
             'views': 1, 'created_at': 1, 'links': 1
         }
         
@@ -602,14 +603,13 @@ def webhook():
                 
                 # Check if we have already welcomed this user in the group (simple set check)
                 if member_id not in GROUP_WELCOME_SENT:
-                    # UPDATED: Removed reference to private chat bot usage
                     welcome_text = (
                         f"👋 Welcome, *{member_name}*, to the official *{PRODUCT_NAME}* group!\n\n"
                         f"You can access all our content here: `{ACCESS_URL}`"
                     )
                     send_message(chat_id, welcome_text, reply_markup=None)
                     GROUP_WELCOME_SENT.add(member_id)
-            return jsonify({"status": "ok"}), 200 # Do not process further in this group message
+            return jsonify({"status": "ok"}), 200 
 
         # 2. ADMIN-ONLY RESTRICTION (Gatekeeper for all Private Chat interactions)
         # chat_id > 0 means it's a private chat (groups have negative chat_ids)
@@ -617,11 +617,38 @@ def webhook():
             send_message(chat_id, "❌ **Access Denied.** Only the administrator can use this bot.")
             return jsonify({"status": "unauthorized"}), 200
         
-        # --- Command Handlers (Only Admin reaches this point in Private Chat) ---
+        # --- NEW 3. FILE FORWARDING LOGIC (Admin Private Chat Only) ---
+        # Check if the message contains any media/file fields
+        has_media = any(key in message for key in ['photo', 'video', 'document', 'audio', 'sticker', 'animation', 'voice'])
         
-        # 3. ADMIN BROADCAST COMMAND 
+        if chat_id > 0 and user_id == ADMIN_TELEGRAM_ID and has_media:
+            # We use forwardMessage to simply copy the original media message (including caption)
+            # to the new target channel.
+            
+            url = TELEGRAM_API + "forwardMessage"
+            payload = {
+                'chat_id': CONTENT_FORWARD_CHANNEL_ID,
+                'from_chat_id': chat_id,
+                'message_id': message['message_id'],
+            }
+            
+            try:
+                response = requests.post(url, json=payload, timeout=5)
+                response.raise_for_status()
+                logger.info(f"Admin file successfully forwarded to channel {CONTENT_FORWARD_CHANNEL_ID}")
+                # Send confirmation back to admin
+                send_message(chat_id, "✅ **File Forwarded!** Your media has been automatically sent to the dedicated content channel.", START_KEYBOARD)
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Error forwarding file: {e}")
+                send_message(chat_id, "❌ **File Forward Failed.** Could not forward file to the content channel.", START_KEYBOARD)
+
+            # File processed, exit webhook to prevent command processing
+            return jsonify({"status": "file forwarded"}), 200
+
+        # --- Command Handlers (Admin Private Chat) ---
+        
+        # 4. ADMIN BROADCAST COMMAND 
         if text.startswith('/broadcast'):
-            # The user_id check here is redundant due to the gatekeeper above, but kept for high-risk command safety
             if user_id == ADMIN_TELEGRAM_ID:
                 USER_STATE[chat_id] = {'step': 'broadcast_message'}
                 send_message(chat_id, "➡️ **ADMIN BROADCAST:** Send the message you want to broadcast to the group.")
@@ -649,7 +676,7 @@ def webhook():
             USER_STATE[chat_id] = {'step': 'main'}
             send_message(chat_id, "Operation cancelled. Choose a new action:", START_KEYBOARD)
             
-        # 4. LIST FILES COMMAND
+        # 5. LIST FILES COMMAND
         elif text.startswith('/files'):
             if content_collection is None:
                 send_message(chat_id, "❌ Database is currently unavailable.")
@@ -675,7 +702,7 @@ def webhook():
                 logger.error(f"Error fetching files list: {e}")
                 send_message(chat_id, "❌ An error occurred while fetching the file list.")
         
-        # 5. POST RANDOM CONTENT COMMAND (MODIFIED FEATURE)
+        # 6. POST RANDOM CONTENT COMMAND
         elif text.startswith('/post'):
             if content_collection is None:
                 send_message(chat_id, "❌ Database is currently unavailable.")
@@ -721,7 +748,7 @@ def webhook():
 
         # --- Multi-step Input Handlers ---
         
-        # 6. BROADCAST FLOW HANDLER
+        # 7. BROADCAST FLOW HANDLER
         elif user_state['step'] == 'broadcast_message':
             broadcast_text = text
             send_message(GROUP_TELEGRAM_ID, f"📢 **ADMIN ANNOUNCEMENT**:\n\n{broadcast_text}")
@@ -735,10 +762,10 @@ def webhook():
             
         elif user_state['step'] == 'add_type':
             user_state['data']['type'] = text
-            user_state['step'] = 'add_category' # MODIFIED STEP
-            send_message(chat_id, "✅ Type saved. Now send the **Category** (e.g., `Hindi` or `Brazzers`).") # ADDED CATEGORY STEP
+            user_state['step'] = 'add_category' 
+            send_message(chat_id, "✅ Type saved. Now send the **Category** (e.g., `Hindi` or `Brazzers`).") 
             
-        elif user_state['step'] == 'add_category': # NEW STEP
+        elif user_state['step'] == 'add_category': 
             user_state['data']['category'] = text
             user_state['step'] = 'add_thumbnail'
             send_message(chat_id, "✅ Category saved. Now send the **Thumbnail URL**.")
@@ -820,7 +847,7 @@ def webhook():
                 user_state['data']['_id'] = content_id
                 user_state['step'] = 'edit_field'
                 
-                edit_fields = ['Title', 'Type', 'Category', 'Thumbnail URL', 'Tags', 'Links'] # ADDED Category
+                edit_fields = ['Title', 'Type', 'Category', 'Thumbnail URL', 'Tags', 'Links'] 
                 keyboard_buttons = [[{'text': f'/edit_{f.lower().replace(" ", "_")}'}] for f in edit_fields]
                 keyboard_buttons.append([{'text': '/cancel'}])
 
@@ -828,7 +855,7 @@ def webhook():
                     f"📝 **Editing Content ID**: `{content_id}`\n\n"
                     f"**Current Title**: {content_doc.get('title', 'N/A')}\n"
                     f"**Current Type**: {content_doc.get('type', 'N/A')}\n"
-                    f"**Current Category**: {content_doc.get('category', 'N/A')}\n\n" # Displayed Category
+                    f"**Current Category**: {content_doc.get('category', 'N/A')}\n\n" 
                     "Please select a field to update:"
                 )
                 
@@ -855,7 +882,7 @@ def webhook():
             update_data = {}
             if field == 'tags':
                 update_data['tags'] = [t.strip().lower() for t in text.split(',') if t.strip()]
-            elif field == 'category': # NEW HANDLER
+            elif field == 'category': 
                 update_data['category'] = text
             elif field == 'links':
                 modified_link_text = text
@@ -909,8 +936,6 @@ def webhook():
 
             USER_STATE[chat_id] = {'step': 'main'}
             
-        # NO GENERIC ELSE BLOCK: Bot ignores messages outside of commands or active state.
-        
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         logger.error(f"Webhook error: {e}")
