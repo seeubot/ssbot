@@ -3,7 +3,7 @@ import json
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS 
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument # ADDED ReturnDocument
 from bson import ObjectId
 from datetime import datetime
 import logging
@@ -31,10 +31,11 @@ logger = logging.getLogger(__name__)
 client = None
 db = None
 content_collection = None
+counter_collection = None # NEW GLOBAL: For sequence numbering
 
 def init_mongodb():
     """Initialize MongoDB connection with connection pooling."""
-    global client, db, content_collection
+    global client, db, content_collection, counter_collection
     
     try:
         MONGODB_URI = os.environ.get("MONGODB_URI")
@@ -62,6 +63,9 @@ def init_mongodb():
         db = client[db_name]
         content_collection = db[collection_name]
         
+        # NEW: Initialize counter collection for sequential numbering
+        counter_collection = db["counters"]
+        
         # Ensure indexes exist for performance (including a text index for generic search)
         content_collection.create_index([("created_at", -1)])
         content_collection.create_index([("tags", 1)])
@@ -77,6 +81,25 @@ def init_mongodb():
         client = None
         db = None
         return False
+
+def get_next_sequence_value(sequence_name):
+    """Atomically increments and returns the next sequence value from MongoDB."""
+    if counter_collection is None:
+        logger.warning("Counter collection not initialized.")
+        return 0
+    try:
+        # find_one_and_update is atomic and perfect for sequence generation
+        result = counter_collection.find_one_and_update(
+            {'_id': sequence_name},
+            {'$inc': {'sequence_value': 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER
+        )
+        return result['sequence_value']
+    except Exception as e:
+        logger.error(f"Error fetching sequence counter: {e}")
+        return 0
+
 
 # --- 2. SIMPLE AUTHENTICATION ---
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
@@ -595,11 +618,6 @@ def webhook():
         user_id = message['from']['id'] # Get the user's ID
         user_state = USER_STATE.get(chat_id, {'step': 'main'})
         
-        # NOTE ON CONTENT PROTECTION:
-        # Blocking users from forwarding content in the group must be configured 
-        # using Telegram's "Restrict Saving Content" feature in the channel/group settings, 
-        # as this cannot be enforced via bot code.
-
         # 1. GROUP WELCOME MESSAGE (Automatic)
         if chat_id == GROUP_TELEGRAM_ID and 'new_chat_members' in message:
             for member in message['new_chat_members']:
@@ -617,38 +635,46 @@ def webhook():
             return jsonify({"status": "ok"}), 200 
 
         # 2. ADMIN-ONLY RESTRICTION (Gatekeeper for all Private Chat interactions)
-        # chat_id > 0 means it's a private chat (groups have negative chat_ids)
         if chat_id > 0 and user_id != ADMIN_TELEGRAM_ID:
             send_message(chat_id, "❌ **Access Denied.** Only the administrator can use this bot.")
             return jsonify({"status": "unauthorized"}), 200
         
-        # --- NEW 3. FILE FORWARDING LOGIC (Admin Private Chat Only) ---
-        # This logic is for the admin to SUBMIT a file to the content channel.
+        # --- NEW 3. FILE COPY/NUMBERING LOGIC (Admin Private Chat Only) ---
         has_media = any(key in message for key in ['photo', 'video', 'document', 'audio', 'sticker', 'animation', 'voice'])
         
         if chat_id > 0 and user_id == ADMIN_TELEGRAM_ID and has_media:
-            # We use forwardMessage to simply copy the original media message (including caption)
-            # to the new target channel.
             
-            url = TELEGRAM_API + "forwardMessage"
+            # 1. Get the next sequence number for the post
+            sequence_number = get_next_sequence_value("content_post_sequence")
+            
+            # 2. Extract original caption and create the new numbered caption
+            original_caption = message.get('caption', '')
+            # Prepend the sequence number in bold
+            new_caption = f"**#{sequence_number}**\n\n{original_caption}"
+
+            # 3. Use copyMessage to hide the 'Forwarded from' tag and send the numbered content
+            url = TELEGRAM_API + "copyMessage"
             payload = {
                 'chat_id': CONTENT_FORWARD_CHANNEL_ID,
                 'from_chat_id': chat_id,
                 'message_id': message['message_id'],
+                'caption': new_caption,
+                'parse_mode': 'Markdown'
             }
             
             try:
                 response = requests.post(url, json=payload, timeout=5)
                 response.raise_for_status()
-                logger.info(f"Admin file successfully forwarded to channel {CONTENT_FORWARD_CHANNEL_ID}")
+                logger.info(f"Admin file #{sequence_number} successfully copied to channel {CONTENT_FORWARD_CHANNEL_ID}")
+                
                 # Send confirmation back to admin
-                send_message(chat_id, "✅ **File Forwarded!** Your media has been automatically sent to the dedicated content channel.", START_KEYBOARD)
+                send_message(chat_id, f"✅ **File Copied!** Media has been sent to the content channel as post **#{sequence_number}**.", START_KEYBOARD)
             except requests.exceptions.RequestException as e:
-                logger.error(f"Error forwarding file: {e}")
-                send_message(chat_id, "❌ **File Forward Failed.** Could not forward file to the content channel.", START_KEYBOARD)
+                logger.error(f"Error copying file: {e}")
+                send_message(chat_id, "❌ **File Copy Failed.** Could not copy file to the content channel.", START_KEYBOARD)
 
             # File processed, exit webhook to prevent command processing
-            return jsonify({"status": "file forwarded"}), 200
+            return jsonify({"status": "file copied"}), 200
 
         # --- Command Handlers (Admin Private Chat) ---
         
