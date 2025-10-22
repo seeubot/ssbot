@@ -20,9 +20,7 @@ CONTENT_FORWARD_CHANNEL_ID = -1002776780769 # ID for forwarding uploaded/sent fi
 PRODUCT_NAME = "Adult-Hub"
 ACCESS_URL = "teluguxx.vercel.app" # Base URL for the front end
 
-# --- NEW REFERRAL CONFIGURATION ---
-REFERRAL_LINK = "https://t.me/+oOdTY-zbwCY3MzA1" # Link for user to refer
-ACCESS_CHANNEL_LINK = "https://t.me/+RrBzvUfw250yZjE1" # Link the user gets access to
+# Referral configuration section removed as requested.
 # ------------------------------------
 
 # --- LOGGING SETUP ---
@@ -70,7 +68,7 @@ def init_mongodb():
         # Initialize counter collection for sequential numbering
         counter_collection = db["counters"]
         
-        # Ensure indexes exist for performance (category index removed)
+        # Ensure indexes exist for performance 
         content_collection.create_index([("created_at", -1)])
         content_collection.create_index([("tags", 1)])
         content_collection.create_index([("views", -1)])
@@ -283,12 +281,13 @@ def send_group_notification(title, thumbnail_url, content_id):
     """
     Sends a photo notification with an inline button to the group chat.
     Uses 'web_app' for "Watch Now" to open in the Telegram client.
+    Handles potential 'sendPhoto' failure by falling back to a text message.
     """
     if not TELEGRAM_API or GROUP_TELEGRAM_ID is None:
         logger.warning("Telegram bot or group ID not configured for notification.")
         return
 
-    # Use the base URL for the Web App and referral link
+    # Use the base URL for the Web App
     watch_link = f"https://{ACCESS_URL}"
     
     # 1. Caption text (displaying only the base URL for branding)
@@ -301,10 +300,8 @@ def send_group_notification(title, thumbnail_url, content_id):
     # 2. Inline Keyboard Markup (using 'web_app' for Watch Now)
     inline_keyboard = {
         'inline_keyboard': [
-            # IMPORTANT CHANGE: Use 'web_app' to open the site in Telegram's internal browser
+            # Use 'web_app' to open the site in Telegram's internal browser
             [{'text': '🎬 Watch Now (In Chat)', 'web_app': {'url': watch_link}}], 
-            # The referral link remains a standard 'url' button
-            [{'text': '🤝 Refer to Get Access', 'url': REFERRAL_LINK}] 
         ]
     }
 
@@ -323,14 +320,13 @@ def send_group_notification(title, thumbnail_url, content_id):
         response.raise_for_status()
         logger.info(f"New content notification sent to group {GROUP_TELEGRAM_ID} with WebApp button for content ID {content_id}.")
     except requests.exceptions.RequestException as e:
-        logger.warning(f"Error sending group notification (sendPhoto failed): {e}")
+        # Fallback due to potential image loading error (e.g., image too large, inaccessible URL)
+        logger.warning(f"Error sending group photo notification (Image Failed): {e}. Falling back to text message.")
         
-        # Fallback to sending a text message which includes the full link 
         fallback_text = (
-            f"🔥 **NEW RELEASE!** (Photo failed) 🔥\n\n"
+            f"🔥 **NEW RELEASE!** (Image Failed - See logs) 🔥\n\n"
             f"*{title}* has been added to {PRODUCT_NAME}!\n\n"
-            f"🔗 *Watch Link:* {watch_link}\n"
-            f"🔗 *Referral Link:* {REFERRAL_LINK}" 
+            f"🔗 *Watch Link:* {watch_link}" 
         )
         send_message(GROUP_TELEGRAM_ID, fallback_text, reply_markup=None)
 
@@ -342,7 +338,6 @@ def save_content(content_data):
         document = {
             "title": content_data.get('title'),
             "type": content_data.get('type'),
-            # "category" REMOVED
             "thumbnail_url": content_data.get('thumbnail_url'),
             "tags": [t.strip().lower() for t in content_data.get('tags', '').split(',') if t.strip()],
             "links": content_data.get('links', []),
@@ -416,7 +411,6 @@ def track_view():
 def get_content():
     """
     Fast content retrieval with pagination, caching, and flexible search.
-    'Category' filter parameter has been removed.
     """
     if content_collection is None:
         return jsonify({"error": "Database not configured."}), 503
@@ -429,8 +423,6 @@ def get_content():
         content_type = request.args.get('type')
         tag_filter = request.args.get('tag')
         
-        # category_filter removed
-        
         # New flexible search parameter
         search_query = request.args.get('q') 
         
@@ -439,13 +431,11 @@ def get_content():
         if content_type:
             query['type'] = content_type
             
-        # category_filter logic removed
-            
         if tag_filter:
             # Traditional exact tag search (for backward compatibility)
             query['tags'] = tag_filter.lower()
             
-        # --- FLEXIBLE SEARCH IMPLEMENTATION (Category removed) ---
+        # --- FLEXIBLE SEARCH IMPLEMENTATION ---
         if search_query:
             if 'tags' in query:
                 del query['tags']
@@ -461,7 +451,7 @@ def get_content():
         # --- END FLEXIBLE SEARCH ---
         
         projection = {
-            'title': 1, 'type': 1, 'thumbnail_url': 1, 'tags': 1, # Category removed
+            'title': 1, 'type': 1, 'thumbnail_url': 1, 'tags': 1, 
             'views': 1, 'created_at': 1, 'links': 1
         }
         
@@ -632,8 +622,8 @@ def webhook():
                 if member_id not in GROUP_WELCOME_SENT:
                     welcome_text = (
                         f"👋 Welcome, *{member_name}*, to the official *{PRODUCT_NAME}* group!\n\n"
-                        f"You can access all our content here: `{ACCESS_URL}`\n\n"
-                        f"**To gain premium access, you must refer {REFERRAL_LINK} to 5 members!**"
+                        f"You can access all our content here: `{ACCESS_URL}`"
+                        # Referral instruction removed
                     )
                     send_message(chat_id, welcome_text, reply_markup=None)
                     GROUP_WELCOME_SENT.add(member_id)
@@ -796,11 +786,8 @@ def webhook():
             
         elif user_state['step'] == 'add_type':
             user_state['data']['type'] = text
-            # JUMPING to add_thumbnail since category is removed
             user_state['step'] = 'add_thumbnail' 
-            send_message(chat_id, "✅ Type saved. Now send the **Thumbnail URL**.") # Updated prompt
-            
-        # Category step removed
+            send_message(chat_id, "✅ Type saved. Now send the **Thumbnail URL**.") 
             
         elif user_state['step'] == 'add_thumbnail':
             user_state['data']['thumbnail_url'] = text
@@ -823,7 +810,6 @@ def webhook():
                 content_id = save_content(user_state['data'])
                 if content_id:
                     # NEW: Auto-forward notification to group with WebApp button
-                    # Running this in a thread too to not delay the immediate response back to the admin
                     threading.Thread(
                         target=send_group_notification,
                         args=(user_state['data']['title'], user_state['data']['thumbnail_url'], content_id)
@@ -879,7 +865,6 @@ def webhook():
                 user_state['data']['_id'] = content_id
                 user_state['step'] = 'edit_field'
                 
-                # Category removed from edit fields
                 edit_fields = ['Title', 'Type', 'Thumbnail URL', 'Tags', 'Links'] 
                 keyboard_buttons = [[{'text': f'/edit_{f.lower().replace(" ", "_")}'}] for f in edit_fields]
                 keyboard_buttons.append([{'text': '/cancel'}])
@@ -914,7 +899,6 @@ def webhook():
             update_data = {}
             if field == 'tags':
                 update_data['tags'] = [t.strip().lower() for t in text.split(',') if t.strip()]
-            # REMOVED: elif field == 'category': update_data['category'] = text
             elif field == 'links':
                 modified_link_text = text
                 
