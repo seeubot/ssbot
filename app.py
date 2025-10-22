@@ -3,7 +3,7 @@ import json
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS 
-from pymongo import MongoClient, ReturnDocument # ADDED ReturnDocument
+from pymongo import MongoClient, ReturnDocument 
 from bson import ObjectId
 from datetime import datetime
 import logging
@@ -16,9 +16,14 @@ import pymongo.operations
 # --- CONSTANTS & CONFIGURATION ---
 ADMIN_TELEGRAM_ID = 1352497419  # User's specified admin ID for Telegram commands
 GROUP_TELEGRAM_ID = -1002541647242 # User's specified target group ID for notifications
-CONTENT_FORWARD_CHANNEL_ID = -1002776780769 # NEW: ID for forwarding uploaded/sent files
+CONTENT_FORWARD_CHANNEL_ID = -1002776780769 # ID for forwarding uploaded/sent files
 PRODUCT_NAME = "Adult-Hub"
 ACCESS_URL = "teluguxx.vercel.app"
+
+# --- NEW REFERRAL CONFIGURATION ---
+REFERRAL_LINK = "https://t.me/+oOdTY-zbwCY3MzA1" # Link for user to refer
+ACCESS_CHANNEL_LINK = "https://t.me/+RrBzvUfw250yZjE1" # Link the user gets access to
+# ------------------------------------
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -31,7 +36,7 @@ logger = logging.getLogger(__name__)
 client = None
 db = None
 content_collection = None
-counter_collection = None # NEW GLOBAL: For sequence numbering
+counter_collection = None # For sequence numbering
 
 def init_mongodb():
     """Initialize MongoDB connection with connection pooling."""
@@ -41,10 +46,9 @@ def init_mongodb():
         MONGODB_URI = os.environ.get("MONGODB_URI")
         if not MONGODB_URI:
             logger.error("MONGODB_URI environment variable is not set.")
-            content_collection = None # Ensure global is unset on failure
+            content_collection = None 
             return False
         
-        # NOTE: maxPoolSize and minPoolSize set for high concurrency
         client = MongoClient(
             MONGODB_URI,
             serverSelectionTimeoutMS=5000, 
@@ -63,20 +67,18 @@ def init_mongodb():
         db = client[db_name]
         content_collection = db[collection_name]
         
-        # NEW: Initialize counter collection for sequential numbering
+        # Initialize counter collection for sequential numbering
         counter_collection = db["counters"]
         
-        # Ensure indexes exist for performance (including a text index for generic search)
+        # Ensure indexes exist for performance (category index removed)
         content_collection.create_index([("created_at", -1)])
         content_collection.create_index([("tags", 1)])
         content_collection.create_index([("views", -1)])
-        content_collection.create_index([("category", 1)]) 
         
         logger.info(f"MongoDB connected with connection pooling. Database: {db_name}")
         return True
     except Exception as e:
         logger.error(f"MongoDB initialization failed: {e}")
-        # Ensure global is unset on failure
         content_collection = None
         client = None
         db = None
@@ -88,7 +90,6 @@ def get_next_sequence_value(sequence_name):
         logger.warning("Counter collection not initialized.")
         return 0
     try:
-        # find_one_and_update is atomic and perfect for sequence generation
         result = counter_collection.find_one_and_update(
             {'_id': sequence_name},
             {'$inc': {'sequence_value': 1}},
@@ -279,13 +280,16 @@ def send_message(chat_id, text, reply_markup=None):
         logger.error(f"Error sending message to {chat_id}: {e}")
 
 def send_group_notification(title, thumbnail_url, content_id):
-    """Sends a photo notification with an inline button to the group chat."""
+    """
+    Sends a photo notification with an inline button to the group chat.
+    Includes the new referral button.
+    """
     if not TELEGRAM_API or GROUP_TELEGRAM_ID is None:
         logger.warning("Telegram bot or group ID not configured for notification.")
         return
 
     # Set the content_link to the base ACCESS_URL only
-    content_link = f"https://{ACCESS_URL}"
+    watch_link = f"https://{ACCESS_URL}"
     
     # 1. Caption text (displaying only the base URL for branding)
     caption_text = (
@@ -294,10 +298,11 @@ def send_group_notification(title, thumbnail_url, content_id):
         f"🔗 *Access Site:* `{ACCESS_URL}`"
     )
 
-    # 2. Inline Keyboard Markup (adding a button for the direct content link)
+    # 2. Inline Keyboard Markup (adding a button for the direct content link and referral)
     inline_keyboard = {
         'inline_keyboard': [
-            [{'text': '🎬 Watch Now', 'url': content_link}] # Button now uses the base URL
+            [{'text': '🎬 Watch Now', 'url': watch_link}], 
+            [{'text': '🤝 Refer to Get Access', 'url': REFERRAL_LINK}] # NEW: Referral button
         ]
     }
 
@@ -319,23 +324,23 @@ def send_group_notification(title, thumbnail_url, content_id):
         logger.warning(f"Error sending group notification (sendPhoto failed): {e}")
         
         # Fallback to sending a text message which includes the full link 
-        # since the photo/button failed.
         fallback_text = (
             f"🔥 **NEW RELEASE!** (Photo failed) 🔥\n\n"
             f"*{title}* has been added to {PRODUCT_NAME}!\n\n"
-            f"🔗 *Watch Link:* {content_link}" 
+            f"🔗 *Watch Link:* {watch_link}\n"
+            f"🔗 *Referral Link:* {REFERRAL_LINK}" 
         )
         send_message(GROUP_TELEGRAM_ID, fallback_text, reply_markup=None)
 
 def save_content(content_data):
-    """Saves the complete content document to MongoDB."""
+    """Saves the complete content document to MongoDB (Category removed)."""
     if content_collection is None: 
         return False
     try:
         document = {
             "title": content_data.get('title'),
             "type": content_data.get('type'),
-            "category": content_data.get('category'), 
+            # "category" REMOVED
             "thumbnail_url": content_data.get('thumbnail_url'),
             "tags": [t.strip().lower() for t in content_data.get('tags', '').split(',') if t.strip()],
             "links": content_data.get('links', []),
@@ -409,7 +414,7 @@ def track_view():
 def get_content():
     """
     Fast content retrieval with pagination, caching, and flexible search.
-    Supports 'type', 'tag', 'category' and the new 'q' (query) parameter for search.
+    'Category' filter parameter has been removed.
     """
     if content_collection is None:
         return jsonify({"error": "Database not configured."}), 503
@@ -422,8 +427,7 @@ def get_content():
         content_type = request.args.get('type')
         tag_filter = request.args.get('tag')
         
-        # ADDED: New category filter parameter
-        category_filter = request.args.get('category') 
+        # category_filter removed
         
         # New flexible search parameter
         search_query = request.args.get('q') 
@@ -433,31 +437,29 @@ def get_content():
         if content_type:
             query['type'] = content_type
             
-        if category_filter:
-            query['category'] = category_filter 
+        # category_filter logic removed
             
         if tag_filter:
             # Traditional exact tag search (for backward compatibility)
             query['tags'] = tag_filter.lower()
             
-        # --- FLEXIBLE SEARCH IMPLEMENTATION ---
+        # --- FLEXIBLE SEARCH IMPLEMENTATION (Category removed) ---
         if search_query:
             if 'tags' in query:
                 del query['tags']
                 
             search_regex = {"$regex": search_query, "$options": "i"} # Case-insensitive regex
             
-            # Use $or to search across 'title' OR 'tags' OR 'category'
+            # Use $or to search across 'title' OR 'tags' 
             query['$or'] = [
                 {"title": search_regex},
                 {"tags": search_regex},
-                {"category": search_regex} 
             ]
 
         # --- END FLEXIBLE SEARCH ---
         
         projection = {
-            'title': 1, 'type': 1, 'category': 1, 'thumbnail_url': 1, 'tags': 1, 
+            'title': 1, 'type': 1, 'thumbnail_url': 1, 'tags': 1, # Category removed
             'views': 1, 'created_at': 1, 'links': 1
         }
         
@@ -628,7 +630,8 @@ def webhook():
                 if member_id not in GROUP_WELCOME_SENT:
                     welcome_text = (
                         f"👋 Welcome, *{member_name}*, to the official *{PRODUCT_NAME}* group!\n\n"
-                        f"You can access all our content here: `{ACCESS_URL}`"
+                        f"You can access all our content here: `{ACCESS_URL}`\n\n"
+                        f"**To gain premium access, you must refer {REFERRAL_LINK} to 5 members!**"
                     )
                     send_message(chat_id, welcome_text, reply_markup=None)
                     GROUP_WELCOME_SENT.add(member_id)
@@ -639,7 +642,7 @@ def webhook():
             send_message(chat_id, "❌ **Access Denied.** Only the administrator can use this bot.")
             return jsonify({"status": "unauthorized"}), 200
         
-        # --- NEW 3. FILE COPY/NUMBERING LOGIC (Admin Private Chat Only) ---
+        # --- 3. FILE COPY/NUMBERING LOGIC (Admin Private Chat Only) ---
         has_media = any(key in message for key in ['photo', 'video', 'document', 'audio', 'sticker', 'animation', 'voice'])
         
         if chat_id > 0 and user_id == ADMIN_TELEGRAM_ID and has_media:
@@ -791,13 +794,15 @@ def webhook():
             
         elif user_state['step'] == 'add_type':
             user_state['data']['type'] = text
-            user_state['step'] = 'add_category' 
-            send_message(chat_id, "✅ Type saved. Now send the **Category** (e.g., `Hindi` or `Brazzers`).") 
+            # REMOVED: user_state['step'] = 'add_category' 
+            # JUMPING to add_thumbnail since category is removed
+            user_state['step'] = 'add_thumbnail' 
+            send_message(chat_id, "✅ Type saved. Now send the **Thumbnail URL**.") # Updated prompt
             
-        elif user_state['step'] == 'add_category': 
-            user_state['data']['category'] = text
-            user_state['step'] = 'add_thumbnail'
-            send_message(chat_id, "✅ Category saved. Now send the **Thumbnail URL**.")
+        # REMOVED: elif user_state['step'] == 'add_category': 
+        #   user_state['data']['category'] = text
+        #   user_state['step'] = 'add_thumbnail'
+        #   send_message(chat_id, "✅ Category saved. Now send the **Thumbnail URL**.")
             
         elif user_state['step'] == 'add_thumbnail':
             user_state['data']['thumbnail_url'] = text
@@ -876,15 +881,15 @@ def webhook():
                 user_state['data']['_id'] = content_id
                 user_state['step'] = 'edit_field'
                 
-                edit_fields = ['Title', 'Type', 'Category', 'Thumbnail URL', 'Tags', 'Links'] 
+                # Category removed from edit fields
+                edit_fields = ['Title', 'Type', 'Thumbnail URL', 'Tags', 'Links'] 
                 keyboard_buttons = [[{'text': f'/edit_{f.lower().replace(" ", "_")}'}] for f in edit_fields]
                 keyboard_buttons.append([{'text': '/cancel'}])
 
                 info_text = (
                     f"📝 **Editing Content ID**: `{content_id}`\n\n"
                     f"**Current Title**: {content_doc.get('title', 'N/A')}\n"
-                    f"**Current Type**: {content_doc.get('type', 'N/A')}\n"
-                    f"**Current Category**: {content_doc.get('category', 'N/A')}\n\n" 
+                    f"**Current Type**: {content_doc.get('type', 'N/A')}\n\n" 
                     "Please select a field to update:"
                 )
                 
@@ -911,8 +916,7 @@ def webhook():
             update_data = {}
             if field == 'tags':
                 update_data['tags'] = [t.strip().lower() for t in text.split(',') if t.strip()]
-            elif field == 'category': 
-                update_data['category'] = text
+            # REMOVED: elif field == 'category': update_data['category'] = text
             elif field == 'links':
                 modified_link_text = text
                 
