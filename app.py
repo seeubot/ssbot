@@ -18,7 +18,7 @@ ADMIN_TELEGRAM_ID = 1352497419  # User's specified admin ID for Telegram command
 GROUP_TELEGRAM_ID = -1002541647242 # User's specified target group ID for notifications
 CONTENT_FORWARD_CHANNEL_ID = -1002776780769 # ID for forwarding uploaded/sent files
 PRODUCT_NAME = "Adult-Hub"
-ACCESS_URL = "teluguxx.vercel.app"
+ACCESS_URL = "teluguxx.vercel.app" # Base URL for the front end
 
 # --- NEW REFERRAL CONFIGURATION ---
 REFERRAL_LINK = "https://t.me/+oOdTY-zbwCY3MzA1" # Link for user to refer
@@ -282,13 +282,13 @@ def send_message(chat_id, text, reply_markup=None):
 def send_group_notification(title, thumbnail_url, content_id):
     """
     Sends a photo notification with an inline button to the group chat.
-    Includes the new referral button.
+    Uses 'web_app' for "Watch Now" to open in the Telegram client.
     """
     if not TELEGRAM_API or GROUP_TELEGRAM_ID is None:
         logger.warning("Telegram bot or group ID not configured for notification.")
         return
 
-    # Set the content_link to the base ACCESS_URL only
+    # Use the base URL for the Web App and referral link
     watch_link = f"https://{ACCESS_URL}"
     
     # 1. Caption text (displaying only the base URL for branding)
@@ -298,11 +298,13 @@ def send_group_notification(title, thumbnail_url, content_id):
         f"🔗 *Access Site:* `{ACCESS_URL}`"
     )
 
-    # 2. Inline Keyboard Markup (adding a button for the direct content link and referral)
+    # 2. Inline Keyboard Markup (using 'web_app' for Watch Now)
     inline_keyboard = {
         'inline_keyboard': [
-            [{'text': '🎬 Watch Now', 'url': watch_link}], 
-            [{'text': '🤝 Refer to Get Access', 'url': REFERRAL_LINK}] # NEW: Referral button
+            # IMPORTANT CHANGE: Use 'web_app' to open the site in Telegram's internal browser
+            [{'text': '🎬 Watch Now (In Chat)', 'web_app': {'url': watch_link}}], 
+            # The referral link remains a standard 'url' button
+            [{'text': '🤝 Refer to Get Access', 'url': REFERRAL_LINK}] 
         ]
     }
 
@@ -319,7 +321,7 @@ def send_group_notification(title, thumbnail_url, content_id):
     try:
         response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
-        logger.info(f"New content notification sent to group {GROUP_TELEGRAM_ID} with button for content ID {content_id}.")
+        logger.info(f"New content notification sent to group {GROUP_TELEGRAM_ID} with WebApp button for content ID {content_id}.")
     except requests.exceptions.RequestException as e:
         logger.warning(f"Error sending group notification (sendPhoto failed): {e}")
         
@@ -794,15 +796,11 @@ def webhook():
             
         elif user_state['step'] == 'add_type':
             user_state['data']['type'] = text
-            # REMOVED: user_state['step'] = 'add_category' 
             # JUMPING to add_thumbnail since category is removed
             user_state['step'] = 'add_thumbnail' 
             send_message(chat_id, "✅ Type saved. Now send the **Thumbnail URL**.") # Updated prompt
             
-        # REMOVED: elif user_state['step'] == 'add_category': 
-        #   user_state['data']['category'] = text
-        #   user_state['step'] = 'add_thumbnail'
-        #   send_message(chat_id, "✅ Category saved. Now send the **Thumbnail URL**.")
+        # Category step removed
             
         elif user_state['step'] == 'add_thumbnail':
             user_state['data']['thumbnail_url'] = text
@@ -824,7 +822,7 @@ def webhook():
                 # --- FINAL SAVE ACTION ---
                 content_id = save_content(user_state['data'])
                 if content_id:
-                    # NEW: Auto-forward notification to group with button
+                    # NEW: Auto-forward notification to group with WebApp button
                     # Running this in a thread too to not delay the immediate response back to the admin
                     threading.Thread(
                         target=send_group_notification,
