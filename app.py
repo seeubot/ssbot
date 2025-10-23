@@ -30,57 +30,70 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- 1. OPTIMIZED MONGODB SETUP WITH CONNECTION POOLING ---
+# --- 1. OPTIMIZED MONGODB SETUP WITH CONNECTION POOLING AND RETRY LOGIC ---
 client = None
 db = None
 content_collection = None
 counter_collection = None # For sequence numbering
 
-def init_mongodb():
-    """Initialize MongoDB connection with connection pooling."""
+def init_mongodb_with_retry(max_retries=3, retry_delay=2):
+    """Initialize MongoDB connection with retry logic for network failures."""
     global client, db, content_collection, counter_collection
     
-    try:
-        MONGODB_URI = os.environ.get("MONGODB_URI")
-        if not MONGODB_URI:
-            logger.error("MONGODB_URI environment variable is not set.")
-            content_collection = None 
-            return False
-        
-        client = MongoClient(
-            MONGODB_URI,
-            serverSelectionTimeoutMS=5000, 
-            connectTimeoutMS=5000,
-            socketTimeoutMS=10000,
-            maxPoolSize=50,
-            minPoolSize=10,
-            maxIdleTimeMS=30000
-        )
-        
-        client.admin.command('ping')
-        
-        db_name = os.environ.get("DB_NAME", "streamhub")
-        collection_name = os.environ.get("COLLECTION_NAME", "content_items")
-        
-        db = client[db_name]
-        content_collection = db[collection_name]
-        
-        # Initialize counter collection for sequential numbering
-        counter_collection = db["counters"]
-        
-        # Ensure indexes exist for performance 
-        content_collection.create_index([("created_at", -1)])
-        content_collection.create_index([("tags", 1)])
-        content_collection.create_index([("views", -1)])
-        
-        logger.info(f"MongoDB connected with connection pooling. Database: {db_name}")
-        return True
-    except Exception as e:
-        logger.error(f"MongoDB initialization failed: {e}")
-        content_collection = None
-        client = None
-        db = None
-        return False
+    for attempt in range(max_retries):
+        try:
+            MONGODB_URI = os.environ.get("MONGODB_URI")
+            if not MONGODB_URI:
+                logger.error("MONGODB_URI environment variable is not set.")
+                return False
+            
+            # Enhanced connection settings for better reliability
+            client = MongoClient(
+                MONGODB_URI,
+                serverSelectionTimeoutMS=10000,  # Increased from 5000
+                connectTimeoutMS=10000,          # Increased from 5000
+                socketTimeoutMS=20000,           # Increased from 10000
+                maxPoolSize=50,
+                minPoolSize=5,                   # Reduced from 10 to save resources
+                maxIdleTimeMS=45000,             # Increased from 30000
+                retryWrites=True,                # Enable automatic retry for writes
+                retryReads=True,                 # Enable automatic retry for reads
+                w='majority'                     # Write concern for durability
+            )
+            
+            # Test connection
+            client.admin.command('ping')
+            
+            db_name = os.environ.get("DB_NAME", "streamhub")
+            collection_name = os.environ.get("COLLECTION_NAME", "content_items")
+            
+            db = client[db_name]
+            content_collection = db[collection_name]
+            counter_collection = db["counters"]
+            
+            # Ensure indexes exist for performance 
+            content_collection.create_index([("created_at", -1)])
+            content_collection.create_index([("tags", 1)])
+            content_collection.create_index([("views", -1)])
+            
+            logger.info(f"MongoDB connected successfully (attempt {attempt + 1}). Database: {db_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"MongoDB initialization attempt {attempt + 1}/{max_retries} failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+            else:
+                content_collection = None
+                client = None
+                db = None
+                return False
+    
+    return False
+
+def init_mongodb():
+    """Legacy wrapper for init_mongodb_with_retry."""
+    return init_mongodb_with_retry()
 
 def get_next_sequence_value(sequence_name):
     """Atomically increments and returns the next sequence value from MongoDB."""
@@ -249,6 +262,28 @@ def get_random_content(limit=5):
         logger.error(f"Error fetching random content: {e}")
         return []
 
+def is_valid_image_url(url):
+    """Validate if URL is likely to work for Telegram photo sending."""
+    try:
+        if not url or not url.startswith(('http://', 'https://')):
+            return False
+        
+        # Check if URL is accessible and returns an image
+        response = requests.head(url, timeout=3, allow_redirects=True)
+        content_type = response.headers.get('content-type', '').lower()
+        
+        # Verify it's an image and under Telegram's 5MB limit
+        if 'image' in content_type:
+            content_length = response.headers.get('content-length')
+            if content_length and int(content_length) > 5 * 1024 * 1024:  # 5MB
+                logger.warning(f"Image too large: {url} ({content_length} bytes)")
+                return False
+            return True
+        return False
+    except Exception as e:
+        logger.warning(f"Image validation failed for {url}: {e}")
+        return False
+
 def send_message(chat_id, text, reply_markup=None):
     """Sends a message back to the user with timeout."""
     if not TELEGRAM_API:
@@ -279,56 +314,65 @@ def send_message(chat_id, text, reply_markup=None):
 
 def send_group_notification(title, thumbnail_url, content_id):
     """
-    Sends a photo notification with an inline button to the group chat.
-    Uses 'web_app' for "Watch Now" to open in the Telegram client.
-    Handles potential 'sendPhoto' failure by falling back to a text message.
+    Sends notification to group with improved error handling and validation.
     """
     if not TELEGRAM_API or GROUP_TELEGRAM_ID is None:
         logger.warning("Telegram bot or group ID not configured for notification.")
         return
 
-    # Use the base URL for the Web App
     watch_link = f"https://{ACCESS_URL}"
     
-    # 1. Caption text (displaying only the base URL for branding)
-    caption_text = (
+    # Validate the image URL first
+    is_valid_image = is_valid_image_url(thumbnail_url)
+    
+    if is_valid_image:
+        # Try sending with photo
+        caption_text = (
+            f"🔥 **NEW RELEASE!** 🔥\n\n"
+            f"*{title}* has been added to {PRODUCT_NAME}!\n\n"
+            f"🔗 *Access Site:* `{ACCESS_URL}`"
+        )
+
+        inline_keyboard = {
+            'inline_keyboard': [
+                [{'text': '🎬 Watch Now (In Chat)', 'web_app': {'url': watch_link}}],
+            ]
+        }
+
+        url = TELEGRAM_API + "sendPhoto"
+        payload = {
+            'chat_id': GROUP_TELEGRAM_ID,
+            'photo': thumbnail_url,
+            'caption': caption_text,
+            'parse_mode': 'Markdown',
+            'disable_notification': False,
+            'reply_markup': json.dumps(inline_keyboard)
+        }
+
+        try:
+            response = requests.post(url, json=payload, timeout=10)  # Increased timeout
+            response.raise_for_status()
+            logger.info(f"Photo notification sent successfully for content ID {content_id}.")
+            return
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Photo notification failed: {e}. Falling back to text.")
+    else:
+        logger.info(f"Invalid/inaccessible image URL, using text notification for: {thumbnail_url}")
+    
+    # Fallback to text message with inline button
+    fallback_text = (
         f"🔥 **NEW RELEASE!** 🔥\n\n"
         f"*{title}* has been added to {PRODUCT_NAME}!\n\n"
         f"🔗 *Access Site:* `{ACCESS_URL}`"
     )
-
-    # 2. Inline Keyboard Markup (using 'web_app' for Watch Now)
+    
     inline_keyboard = {
         'inline_keyboard': [
-            # Use 'web_app' to open the site in Telegram's internal browser
-            [{'text': '🎬 Watch Now (In Chat)', 'web_app': {'url': watch_link}}], 
+            [{'text': '🎬 Watch Now', 'web_app': {'url': watch_link}}],
         ]
     }
-
-    url = TELEGRAM_API + "sendPhoto"
-    payload = {
-        'chat_id': GROUP_TELEGRAM_ID,
-        'photo': thumbnail_url,
-        'caption': caption_text,
-        'parse_mode': 'Markdown',
-        'disable_notification': False, 
-        'reply_markup': json.dumps(inline_keyboard) # Add the inline button
-    }
-
-    try:
-        response = requests.post(url, json=payload, timeout=5)
-        response.raise_for_status()
-        logger.info(f"New content notification sent to group {GROUP_TELEGRAM_ID} with WebApp button for content ID {content_id}.")
-    except requests.exceptions.RequestException as e:
-        # Fallback due to potential image loading error (e.g., image too large, inaccessible URL)
-        logger.warning(f"Error sending group photo notification (Image Failed): {e}. Falling back to text message.")
-        
-        fallback_text = (
-            f"🔥 **NEW RELEASE!** (Image Failed - See logs) 🔥\n\n"
-            f"*{title}* has been added to {PRODUCT_NAME}!\n\n"
-            f"🔗 *Watch Link:* {watch_link}" 
-        )
-        send_message(GROUP_TELEGRAM_ID, fallback_text, reply_markup=None)
+    
+    send_message(GROUP_TELEGRAM_ID, fallback_text, reply_markup=inline_keyboard)
 
 def save_content(content_data):
     """Saves the complete content document to MongoDB (Category removed)."""
@@ -745,7 +789,7 @@ def webhook():
                 post_limit = max(1, min(5, calculated_limit)) # Dynamic limit logic
                 
                 # Inform user about the determined limit
-                send_message(chat_id, f"⌛ Total Content: {total_content}. Fetching **{post_limit}** random items and initiating posts to the group...")
+                send_message(chat_id, f"⏳ Total Content: {total_content}. Fetching **{post_limit}** random items and initiating posts to the group...")
 
                 random_items = get_random_content(post_limit) # Use the dynamic limit
                 
@@ -870,7 +914,7 @@ def webhook():
                 keyboard_buttons.append([{'text': '/cancel'}])
 
                 info_text = (
-                    f"📝 **Editing Content ID**: `{content_id}`\n\n"
+                    f"🔍 **Editing Content ID**: `{content_id}`\n\n"
                     f"**Current Title**: {content_doc.get('title', 'N/A')}\n"
                     f"**Current Type**: {content_doc.get('type', 'N/A')}\n\n" 
                     "Please select a field to update:"
@@ -961,43 +1005,61 @@ def webhook():
 # -------------------------------------------------------------
 
 def flush_view_cache():
-    """Periodically flush view count cache to database."""
-    global view_count_cache 
+    """Periodically flush view count cache to database with error recovery."""
+    global view_count_cache
+    consecutive_errors = 0
+    max_consecutive_errors = 5
+    
     while True:
-        # NOTE: Reduced sleep time from original to be more aggressive on view updates
-        time.sleep(15) 
+        time.sleep(15)
+        
+        if consecutive_errors >= max_consecutive_errors:
+            logger.error("Too many consecutive errors in view cache flush. Attempting MongoDB reconnection...")
+            if init_mongodb_with_retry():
+                consecutive_errors = 0
+                logger.info("MongoDB reconnection successful after view cache errors.")
+            else:
+                logger.error("MongoDB reconnection failed. Waiting 60 seconds before retry...")
+                time.sleep(60)
+                continue
+        
         try:
             with cache_lock:
-                if not view_count_cache:
+                if not view_count_cache or content_collection is None:
                     continue
-                    
-                bulk_ops = []
-                keys_to_delete = [] 
                 
-                for cache_key, count in list(view_count_cache.items()): 
+                bulk_ops = []
+                keys_to_delete = []
+                
+                for cache_key, count in list(view_count_cache.items()):
                     if count > 0:
                         content_id = cache_key.replace('views_', '')
-                        # Ensure ID is valid before creating the operation
                         if ObjectId.is_valid(content_id):
                             bulk_ops.append(
                                 pymongo.operations.UpdateOne(
                                     {"_id": ObjectId(content_id)},
-                                    {"$inc": {"views": count}, "$set": {"last_viewed": datetime.utcnow()}}
+                                    {
+                                        "$inc": {"views": count},
+                                        "$set": {"last_viewed": datetime.utcnow()}
+                                    }
                                 )
                             )
                             keys_to_delete.append(cache_key)
-
-                if bulk_ops and content_collection is not None:
-                    # Write all updates in one bulk operation for efficiency
-                    content_collection.bulk_write(bulk_ops)
+                
+                if bulk_ops:
+                    result = content_collection.bulk_write(bulk_ops, ordered=False)
+                    logger.info(f"Flushed {result.modified_count} view count updates to database")
                     
-                    # Clear processed keys from the in-memory cache
+                    # Clear processed keys
                     for key in keys_to_delete:
                         if key in view_count_cache:
-                            del view_count_cache[key] 
-                
+                            del view_count_cache[key]
+                    
+                    consecutive_errors = 0  # Reset error counter on success
+                    
         except Exception as e:
-            logger.error(f"Error flushing view cache: {e}")
+            consecutive_errors += 1
+            logger.error(f"Error flushing view cache (error count: {consecutive_errors}/{max_consecutive_errors}): {e}")
 
 # -------------------------------------------------------------
 # --- APPLICATION STARTUP ---
@@ -1037,7 +1099,9 @@ def before_request():
 if __name__ == '__main__':
     logger.info("Starting Optimized StreamHub (Adult-Hub) Application...")
     
-    init_mongodb()
+    # Use the retry-enabled initialization
+    if not init_mongodb_with_retry():
+        logger.error("Failed to initialize MongoDB after retries. Continuing without database...")
     
     # Start background tasks
     cache_thread = threading.Thread(target=flush_view_cache, daemon=True)
@@ -1050,4 +1114,3 @@ if __name__ == '__main__':
     
     logger.info(f"Starting optimized Flask app on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
-
