@@ -148,7 +148,6 @@ PORT = int(os.environ.get("PORT", 8000))
 
 # Clean the bot token and create API URL
 if BOT_TOKEN:
-    # Remove any whitespace and ensure proper formatting
     BOT_TOKEN = BOT_TOKEN.strip()
     TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 else:
@@ -547,11 +546,11 @@ def admin_delete_content(content_id):
         logger.error(f"Admin content deletion error: {e}")
         return jsonify({"success": False, "error": "Invalid content ID"}), 400
 
-# --- SIMPLIFIED TELEGRAM WEBHOOK ---
+# --- COMPLETE TELEGRAM WEBHOOK HANDLER ---
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Simplified webhook handler"""
+    """Complete webhook handler with all commands"""
     if not BOT_TOKEN:
         return jsonify({"status": "telegram not configured"}), 200
         
@@ -567,6 +566,7 @@ def webhook():
         chat_id = message['chat']['id']
         text = message.get('text', '').strip()
         user_id = message['from']['id']
+        user_state = USER_STATE.get(chat_id, {'step': 'main'})
         
         # Only respond to admin in private chats
         if chat_id > 0 and user_id != ADMIN_TELEGRAM_ID:
@@ -574,31 +574,271 @@ def webhook():
             return jsonify({"status": "unauthorized"}), 200
         
         # Handle media files - copy to channel with numbering
-        has_media = any(key in message for key in ['photo', 'video', 'document', 'audio'])
+        has_media = any(key in message for key in ['photo', 'video', 'document', 'audio', 'sticker', 'animation', 'voice'])
         
         if chat_id > 0 and user_id == ADMIN_TELEGRAM_ID and has_media:
             sequence_number = get_next_sequence_value("content_post_sequence")
             new_caption = f"#{sequence_number}\n\n{PRODUCT_NAME}"
             
-            copy_message(CONTENT_FORWARD_CHANNEL_ID, chat_id, message['message_id'], new_caption)
-            send_message(chat_id, f"✅ File copied as post #{sequence_number}")
+            success = copy_message(CONTENT_FORWARD_CHANNEL_ID, chat_id, message['message_id'], new_caption)
+            if success:
+                send_message(chat_id, f"✅ File copied as post #{sequence_number}", START_KEYBOARD)
+            else:
+                send_message(chat_id, "❌ Failed to copy file to channel", START_KEYBOARD)
             return jsonify({"status": "file processed"}), 200
         
-        # Handle basic commands
-        if text == '/start':
-            send_message(chat_id, f"🚀 Welcome to {PRODUCT_NAME} Admin Bot!", START_KEYBOARD)
-        elif text == '/post':
-            # Simple post command
-            random_items = get_random_content(3)
-            for item in random_items:
-                send_group_notification(
-                    item.get('title', 'Untitled'), 
-                    item.get('thumbnail_url', ''), 
-                    item['_id']
+        # Handle commands
+        if text.startswith('/start'):
+            USER_STATE[chat_id] = {'step': 'main'}
+            send_message(chat_id, f"🚀 Welcome to {PRODUCT_NAME} Admin Bot! Use the buttons below or type commands.", START_KEYBOARD)
+            
+        elif text.startswith('/add'):
+            USER_STATE[chat_id] = {'step': 'add_title', 'data': {'links': []}}
+            send_message(chat_id, "➡️ ADD Content: Please send the Title of the content.")
+            
+        elif text.startswith('/edit'):
+            USER_STATE[chat_id] = {'step': 'edit_id', 'data': {}}
+            send_message(chat_id, "➡️ EDIT Content: Please send the Content ID you want to edit.")
+            
+        elif text.startswith('/delete'):
+            USER_STATE[chat_id] = {'step': 'delete_id', 'data': {}}
+            send_message(chat_id, "➡️ DELETE Content: Please send the Content ID to confirm deletion.")
+            
+        elif text.startswith('/files'):
+            if content_collection is None:
+                send_message(chat_id, "❌ Database is currently unavailable.")
+                return jsonify({"status": "ok"}), 200
+                
+            try:
+                # Fetch top 10 most recent titles and IDs
+                content_cursor = content_collection.find({}, {'title': 1, 'created_at': 1}).sort("created_at", -1).limit(10)
+                
+                content_list_text = []
+                for i, doc in enumerate(content_cursor):
+                    title = doc.get('title', 'No Title')
+                    _id = str(doc['_id'])
+                    content_list_text.append(f"{i+1}. {title} ({_id})")
+                    
+                if content_list_text:
+                    response_text = "📚 Latest 10 Content Items (Title & ID):\n\n" + "\n".join(content_list_text)
+                else:
+                    response_text = "No content has been uploaded yet."
+                
+                send_message(chat_id, response_text, START_KEYBOARD)
+            except Exception as e:
+                logger.error(f"Error fetching files list: {e}")
+                send_message(chat_id, "❌ An error occurred while fetching the file list.")
+            
+        elif text.startswith('/post'):
+            if content_collection is None:
+                send_message(chat_id, "❌ Database is currently unavailable.")
+                return jsonify({"status": "ok"}), 200
+
+            try:
+                total_content = content_collection.count_documents({})
+                
+                if total_content == 0:
+                    send_message(chat_id, "❌ No content found in the database to post.", START_KEYBOARD)
+                    return jsonify({"status": "ok"}), 200
+                    
+                calculated_limit = total_content // 5
+                post_limit = max(1, min(5, calculated_limit))
+                
+                send_message(chat_id, f"⏳ Total Content: {total_content}. Fetching {post_limit} random items...")
+
+                random_items = get_random_content(post_limit)
+                
+                if not random_items:
+                    send_message(chat_id, "❌ No content found in the database to post.", START_KEYBOARD)
+                    return jsonify({"status": "ok"}), 200
+
+                posted_count = 0
+                for item in random_items:
+                    threading.Thread(
+                        target=send_group_notification, 
+                        args=(item.get('title', 'Untitled Content'), item.get('thumbnail_url', ''), item['_id'])
+                    ).start()
+                    posted_count += 1
+                    time.sleep(1)  # Small delay between posts
+                    
+                send_message(chat_id, f"✅ Success! Initiated posting of {posted_count} random content items to the group.", START_KEYBOARD)
+
+            except Exception as e:
+                logger.error(f"Error handling /post command: {e}")
+                send_message(chat_id, "❌ An error occurred while trying to post content.", START_KEYBOARD)
+                
+        elif text.startswith('/broadcast'):
+            USER_STATE[chat_id] = {'step': 'broadcast_message'}
+            send_message(chat_id, "➡️ BROADCAST: Send the message you want to broadcast to the group.")
+            
+        elif text.startswith('/cancel'):
+            USER_STATE[chat_id] = {'step': 'main'}
+            send_message(chat_id, "Operation cancelled. Choose a new action:", START_KEYBOARD)
+            
+        # Multi-step conversation handlers
+        elif user_state['step'] == 'broadcast_message':
+            broadcast_text = text
+            send_message(GROUP_TELEGRAM_ID, f"📢 ADMIN ANNOUNCEMENT:\n\n{broadcast_text}")
+            send_message(chat_id, "✅ Message broadcasted to the group successfully.", START_KEYBOARD)
+            USER_STATE[chat_id] = {'step': 'main'}
+
+        elif user_state['step'] == 'add_title':
+            user_state['data']['title'] = text
+            user_state['step'] = 'add_type'
+            send_message(chat_id, "✅ Title saved. Now send the Type (e.g., movie or series).")
+            
+        elif user_state['step'] == 'add_type':
+            user_state['data']['type'] = text
+            user_state['step'] = 'add_thumbnail'
+            send_message(chat_id, "✅ Type saved. Now send the Thumbnail URL.")
+            
+        elif user_state['step'] == 'add_thumbnail':
+            user_state['data']['thumbnail_url'] = text
+            user_state['step'] = 'add_tags'
+            send_message(chat_id, "✅ URL saved. Now send Tags (comma-separated, e.g., action, thriller, new).")
+            
+        elif user_state['step'] == 'add_tags':
+            user_state['data']['tags'] = text
+            user_state['step'] = 'add_episode_title'
+            send_message(chat_id, "✅ Tags saved. Now send the Episode Title (e.g., 'Episode 1' or 'Main Link'). Type DONE to finish.")
+            
+        elif user_state['step'] == 'add_episode_title':
+            if text.upper() == 'DONE':
+                if not user_state['data']['links']:
+                    send_message(chat_id, "❌ Cannot save content without any links. Please add at least one link or type /cancel.")
+                    return jsonify({"status": "ok"}), 200
+
+                content_id = save_content(user_state['data'])
+                if content_id:
+                    threading.Thread(
+                        target=send_group_notification,
+                        args=(user_state['data']['title'], user_state['data']['thumbnail_url'], content_id)
+                    ).start()
+                    
+                    send_message(chat_id, 
+                                 f"🎉 Success! Content '{user_state['data']['title']}' added to {PRODUCT_NAME} with ID: {content_id}.\n"
+                                 f"Access content at: https://{ACCESS_URL}/content/{content_id}", 
+                                 START_KEYBOARD)
+                else:
+                    send_message(chat_id, "❌ Save Failed. Check server logs for MongoDB error.", START_KEYBOARD)
+                
+                USER_STATE[chat_id] = {'step': 'main'}
+            else:
+                user_state['data']['current_episode_title'] = text
+                user_state['step'] = 'add_episode_url'
+                send_message(chat_id, f"✅ Episode Title saved. Now send the URL for '{text}'.")
+
+        elif user_state['step'] == 'add_episode_url':
+            episode_title = user_state['data'].pop('current_episode_title', 'Link')
+            submitted_url = text
+            
+            # LULUVid URL modification
+            LULUVID_DOMAIN = 'https://luluvid.com/'
+            LULUVID_EMBED = 'https://luluvid.com/e/'
+            modified_url = submitted_url
+
+            if submitted_url.startswith(LULUVID_DOMAIN) and not submitted_url.startswith(LULUVID_EMBED):
+                content_path = submitted_url[len(LULUVID_DOMAIN):].strip('/')
+                if content_path and '/' not in content_path:
+                    modified_url = LULUVID_EMBED + content_path
+                    logger.info(f"LULUVID modification: {submitted_url} -> {modified_url}")
+                
+            user_state['data']['links'].append({
+                "url": modified_url, 
+                "episode_title": episode_title
+            })
+            
+            user_state['step'] = 'add_episode_title'
+            send_message(chat_id, f"✅ Link saved. Current links: {len(user_state['data']['links'])}. Send the NEXT Episode Title or type DONE.")
+            
+        # EDIT FLOW
+        elif user_state['step'] == 'edit_id':
+            content_id = text
+            content_doc = get_content_info_for_edit(content_id)
+            if content_doc:
+                user_state['data']['_id'] = content_id
+                user_state['step'] = 'edit_field'
+                
+                edit_fields = ['Title', 'Type', 'Thumbnail URL', 'Tags', 'Links'] 
+                keyboard_buttons = [[{'text': f'/edit_{f.lower().replace(" ", "_")}'}] for f in edit_fields]
+                keyboard_buttons.append([{'text': '/cancel'}])
+
+                info_text = (
+                    f"🔍 Editing Content ID: {content_id}\n\n"
+                    f"Current Title: {content_doc.get('title', 'N/A')}\n"
+                    f"Current Type: {content_doc.get('type', 'N/A')}\n\n" 
+                    "Please select a field to update:"
                 )
-            send_message(chat_id, f"✅ Posted {len(random_items)} items to group")
+                
+                send_message(chat_id, info_text, {'keyboard': keyboard_buttons, 'resize_keyboard': True})
+            else:
+                send_message(chat_id, "❌ Content ID not found or invalid. Try again or type /cancel.")
+
+        elif user_state['step'] == 'edit_field' and text.startswith('/edit_'):
+            field = text.split('_', 1)[1]
+            user_state['step'] = f'edit_new_{field}'
+            prompt = f"➡️ Please send the NEW value for {field.replace('_', ' ').title()}."
+            if field == 'links':
+                 prompt += "\n(For Links, send the complete, updated list of JSON links, or the single new URL for a movie.)"
+            send_message(chat_id, prompt)
+            
+        elif user_state['step'].startswith('edit_new_'):
+            field = user_state['step'].split('_new_')[1]
+            content_id = user_state['data']['_id']
+            
+            update_data = {}
+            if field == 'tags':
+                update_data['tags'] = [t.strip().lower() for t in text.split(',') if t.strip()]
+            elif field == 'links':
+                modified_link_text = text
+                
+                LULUVID_DOMAIN = 'https://luluvid.com/'
+                LULUVID_EMBED = 'https://luluvid.com/e/'
+
+                if modified_link_text.startswith(LULUVID_DOMAIN) and not modified_link_text.startswith(LULUVID_EMBED):
+                    content_path = modified_link_text[len(LULUVID_DOMAIN):].strip('/')
+                    if content_path and '/' not in content_path:
+                        modified_link_text = LULUVID_EMBED + content_path
+
+                try:
+                    links = json.loads(modified_link_text)
+                    if not isinstance(links, list): raise ValueError
+                    update_data['links'] = links
+                except:
+                    update_data['links'] = [{"url": modified_link_text, "episode_title": "Watch Link"}]
+                    
+            elif field == 'title':
+                update_data['title'] = text
+            elif field == 'type':
+                update_data['type'] = text
+            elif field == 'thumbnail_url':
+                update_data['thumbnail_url'] = text
+            
+            if update_content(content_id, update_data):
+                send_message(chat_id, f"✅ Success! {field.replace('_', ' ').title()} for ID {content_id} updated.", START_KEYBOARD)
+            else:
+                send_message(chat_id, "❌ Update Failed. Content not found or no changes made.", START_KEYBOARD)
+
+            USER_STATE[chat_id] = {'step': 'main'}
+
+        # DELETE FLOW
+        elif user_state['step'] == 'delete_id':
+            content_id = text
+            try:
+                result = content_collection.delete_one({"_id": ObjectId(content_id)})
+                if result.deleted_count > 0:
+                    content_cache.clear()
+                    send_message(chat_id, f"🗑️ Success! Content ID {content_id} has been deleted.", START_KEYBOARD)
+                else:
+                    send_message(chat_id, f"❌ Error: Content ID {content_id} not found.", START_KEYBOARD)
+            except Exception:
+                send_message(chat_id, "❌ Error: Invalid Content ID format.", START_KEYBOARD)
+
+            USER_STATE[chat_id] = {'step': 'main'}
+            
         else:
-            send_message(chat_id, "Use /start to see available commands")
+            # If no command matched, show help
+            send_message(chat_id, "Use /start to see available commands or use the keyboard buttons.")
             
         return jsonify({"status": "ok"}), 200
         
