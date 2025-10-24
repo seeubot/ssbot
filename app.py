@@ -1,4 +1,4 @@
-import os
+Import os
 import json
 import requests
 from flask import Flask, request, jsonify
@@ -312,10 +312,62 @@ def get_random_content(limit=5):
         result = []
         for doc in random_docs:
             doc['_id'] = str(doc['_id']) 
+            if 'created_at' in doc:
+                doc['created_at'] = doc['created_at'].isoformat()
             result.append(doc)
         return result
     except Exception as e:
         logger.error(f"Error fetching random content: {e}")
+        return []
+
+def get_newest_content(limit=10):
+    """Fetches the newest content based on creation date."""
+    if content_collection is None:
+        return []
+    try:
+        # Sort by created_at descending
+        content_cursor = content_collection.find(
+            {}, 
+            {
+                'title': 1, 'type': 1, 'thumbnail_url': 1, 'tags': 1, 
+                'views': 1, 'created_at': 1, 'links': 1
+            }
+        ).sort("created_at", -1).limit(limit)
+        
+        result = []
+        for doc in content_cursor:
+            doc['_id'] = str(doc['_id'])
+            if 'created_at' in doc:
+                doc['created_at'] = doc['created_at'].isoformat()
+            result.append(doc)
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching newest content: {e}")
+        return []
+
+def get_popular_content(limit=10):
+    """Fetches the most popular content based on view count."""
+    if content_collection is None:
+        return []
+    try:
+        # Sort by views descending
+        content_cursor = content_collection.find(
+            {}, 
+            {
+                'title': 1, 'type': 1, 'thumbnail_url': 1, 'tags': 1, 
+                'views': 1, 'created_at': 1, 'links': 1
+            }
+        ).sort("views", -1).limit(limit)
+        
+        result = []
+        for doc in content_cursor:
+            doc['_id'] = str(doc['_id'])
+            if 'created_at' in doc:
+                doc['created_at'] = doc['created_at'].isoformat()
+            result.append(doc)
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching popular content: {e}")
         return []
 
 def save_content(content_data):
@@ -463,6 +515,38 @@ def get_content_by_id(content_id):
     except Exception as e:
         logger.error(f"API Single Fetch Error: {e}")
         return jsonify({"success": False, "error": "Invalid content ID"}), 400
+
+@app.route('/api/content/new', methods=['GET'])
+@cached_response(timeout=30)
+def get_new():
+    """API route to get the 10 newest content items."""
+    if content_collection is None:
+        return jsonify({"success": False, "error": "Database not configured."}), 503
+    
+    try:
+        # Default limit to 10, max 50
+        limit = min(int(request.args.get('limit', 10)), 50)
+        new_content = get_newest_content(limit)
+        return jsonify({"success": True, "data": new_content}), 200
+    except Exception as e:
+        logger.error(f"API New Content Fetch Error: {e}")
+        return jsonify({"success": False, "error": "Failed to retrieve new content."}), 500
+
+@app.route('/api/content/popular', methods=['GET'])
+@cached_response(timeout=30)
+def get_popular():
+    """API route to get the 10 most popular content items based on views."""
+    if content_collection is None:
+        return jsonify({"success": False, "error": "Database not configured."}), 503
+    
+    try:
+        # Default limit to 10, max 50
+        limit = min(int(request.args.get('limit', 10)), 50)
+        popular_content = get_popular_content(limit)
+        return jsonify({"success": True, "data": popular_content}), 200
+    except Exception as e:
+        logger.error(f"API Popular Content Fetch Error: {e}")
+        return jsonify({"success": False, "error": "Failed to retrieve popular content."}), 500
 
 @app.route('/api/content/similar/<tags>', methods=['GET'])
 @cached_response(timeout=30)
@@ -924,3 +1008,4 @@ if __name__ == '__main__':
     
     logger.info(f"Starting Flask app on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+
