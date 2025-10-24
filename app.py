@@ -1,4 +1,4 @@
-import os
+Import os
 import json
 import requests
 from flask import Flask, request, jsonify
@@ -19,9 +19,6 @@ GROUP_TELEGRAM_ID = -1002541647242 # User's specified target group ID for notifi
 CONTENT_FORWARD_CHANNEL_ID = -1002776780769 # ID for forwarding uploaded/sent files
 PRODUCT_NAME = "Adult-Hub"
 ACCESS_URL = "teluguxx.vercel.app" # Base URL for the front end
-
-# Referral configuration section removed as requested.
-# ------------------------------------
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -268,7 +265,12 @@ def is_valid_image_url(url):
         if not url or not url.startswith(('http://', 'https://')):
             return False
         
-        # Check if URL is accessible and returns an image
+        # Skip HEAD requests for lulucdn.com as they might be blocked
+        if 'lulucdn.com' in url:
+            # For lulucdn, assume it's valid and let Telegram handle it
+            return True
+        
+        # For other domains, check if URL is accessible and returns an image
         response = requests.head(url, timeout=3, allow_redirects=True)
         content_type = response.headers.get('content-type', '').lower()
         
@@ -282,19 +284,20 @@ def is_valid_image_url(url):
         return False
     except Exception as e:
         logger.warning(f"Image validation failed for {url}: {e}")
-        return False
+        # If validation fails but URL looks reasonable, let Telegram try it
+        return any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp'])
 
-def send_message(chat_id, text, reply_markup=None):
-    """Sends a message back to the user with timeout."""
+def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown'):
+    """Sends a message back to the user with timeout and better error handling."""
     if not TELEGRAM_API:
         logger.warning("Telegram bot token not configured")
-        return
+        return False
     
     url = TELEGRAM_API + "sendMessage"
     payload = {
         'chat_id': chat_id,
         'text': text,
-        'parse_mode': 'Markdown'
+        'parse_mode': parse_mode
     }
     
     if reply_markup is not None:
@@ -306,11 +309,26 @@ def send_message(chat_id, text, reply_markup=None):
              payload['reply_markup'] = json.dumps(START_KEYBOARD)
 
     try:
-        response = requests.post(url, json=payload, timeout=5)
+        response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
         logger.info(f"Message sent to chat_id {chat_id}")
+        return True
     except requests.exceptions.RequestException as e:
         logger.error(f"Error sending message to {chat_id}: {e}")
+        
+        # Try without Markdown if that was the issue
+        if parse_mode == 'Markdown':
+            logger.info(f"Retrying without Markdown formatting for chat_id {chat_id}")
+            payload['parse_mode'] = None
+            try:
+                response = requests.post(url, json=payload, timeout=10)
+                response.raise_for_status()
+                logger.info(f"Message sent to chat_id {chat_id} (without Markdown)")
+                return True
+            except requests.exceptions.RequestException as e2:
+                logger.error(f"Error sending message without Markdown to {chat_id}: {e2}")
+        
+        return False
 
 def send_group_notification(title, thumbnail_url, content_id):
     """
@@ -350,20 +368,30 @@ def send_group_notification(title, thumbnail_url, content_id):
         }
 
         try:
-            response = requests.post(url, json=payload, timeout=10)  # Increased timeout
+            response = requests.post(url, json=payload, timeout=15)
             response.raise_for_status()
             logger.info(f"Photo notification sent successfully for content ID {content_id}.")
             return
         except requests.exceptions.RequestException as e:
             logger.warning(f"Photo notification failed: {e}. Falling back to text.")
+            
+            # Try without Markdown in caption
+            try:
+                payload['parse_mode'] = None
+                response = requests.post(url, json=payload, timeout=15)
+                response.raise_for_status()
+                logger.info(f"Photo notification sent successfully without Markdown for content ID {content_id}.")
+                return
+            except requests.exceptions.RequestException as e2:
+                logger.warning(f"Photo notification without Markdown also failed: {e2}. Falling back to text.")
     else:
         logger.info(f"Invalid/inaccessible image URL, using text notification for: {thumbnail_url}")
     
     # Fallback to text message with inline button
     fallback_text = (
-        f"🔥 **NEW RELEASE!** 🔥\n\n"
-        f"*{title}* has been added to {PRODUCT_NAME}!\n\n"
-        f"🔗 *Access Site:* `{ACCESS_URL}`"
+        f"🔥 NEW RELEASE! 🔥\n\n"
+        f"{title} has been added to {PRODUCT_NAME}!\n\n"
+        f"Access Site: {ACCESS_URL}"
     )
     
     inline_keyboard = {
@@ -372,7 +400,8 @@ def send_group_notification(title, thumbnail_url, content_id):
         ]
     }
     
-    send_message(GROUP_TELEGRAM_ID, fallback_text, reply_markup=inline_keyboard)
+    # Use text-only without Markdown for better compatibility
+    send_message(GROUP_TELEGRAM_ID, fallback_text, reply_markup=inline_keyboard, parse_mode=None)
 
 def save_content(content_data):
     """Saves the complete content document to MongoDB (Category removed)."""
@@ -665,17 +694,16 @@ def webhook():
                 # Check if we have already welcomed this user in the group (simple set check)
                 if member_id not in GROUP_WELCOME_SENT:
                     welcome_text = (
-                        f"👋 Welcome, *{member_name}*, to the official *{PRODUCT_NAME}* group!\n\n"
-                        f"You can access all our content here: `{ACCESS_URL}`"
-                        # Referral instruction removed
+                        f"👋 Welcome, {member_name}, to the official {PRODUCT_NAME} group!\n\n"
+                        f"You can access all our content here: {ACCESS_URL}"
                     )
-                    send_message(chat_id, welcome_text, reply_markup=None)
+                    send_message(chat_id, welcome_text, reply_markup=None, parse_mode=None)
                     GROUP_WELCOME_SENT.add(member_id)
             return jsonify({"status": "ok"}), 200 
 
         # 2. ADMIN-ONLY RESTRICTION (Gatekeeper for all Private Chat interactions)
         if chat_id > 0 and user_id != ADMIN_TELEGRAM_ID:
-            send_message(chat_id, "❌ **Access Denied.** Only the administrator can use this bot.")
+            send_message(chat_id, "❌ Access Denied. Only the administrator can use this bot.", parse_mode=None)
             return jsonify({"status": "unauthorized"}), 200
         
         # --- 3. FILE COPY/NUMBERING LOGIC (Admin Private Chat Only) ---
@@ -687,7 +715,7 @@ def webhook():
             sequence_number = get_next_sequence_value("content_post_sequence")
             
             # 2. CREATE NEW CAPTION: Remove original text/links, use only number and product name
-            new_caption = f"**#{sequence_number}**\n\n{PRODUCT_NAME}"
+            new_caption = f"#{sequence_number}\n\n{PRODUCT_NAME}"
 
             # 3. Use copyMessage to hide the 'Forwarded from' tag and send the numbered content
             url = TELEGRAM_API + "copyMessage"
@@ -696,19 +724,19 @@ def webhook():
                 'from_chat_id': chat_id,
                 'message_id': message['message_id'],
                 'caption': new_caption,
-                'parse_mode': 'Markdown'
+                'parse_mode': None  # No markdown for captions to avoid issues
             }
             
             try:
-                response = requests.post(url, json=payload, timeout=5)
+                response = requests.post(url, json=payload, timeout=10)
                 response.raise_for_status()
                 logger.info(f"Admin file #{sequence_number} successfully copied to channel {CONTENT_FORWARD_CHANNEL_ID}")
                 
                 # Send confirmation back to admin
-                send_message(chat_id, f"✅ **File Copied!** Media has been sent to the content channel as post **#{sequence_number}**.", START_KEYBOARD)
+                send_message(chat_id, f"✅ File Copied! Media has been sent to the content channel as post #{sequence_number}.", START_KEYBOARD, parse_mode=None)
             except requests.exceptions.RequestException as e:
                 logger.error(f"Error copying file: {e}")
-                send_message(chat_id, "❌ **File Copy Failed.** Could not copy file to the content channel.", START_KEYBOARD)
+                send_message(chat_id, "❌ File Copy Failed. Could not copy file to the content channel.", START_KEYBOARD, parse_mode=None)
 
             # File processed, exit webhook to prevent command processing
             return jsonify({"status": "file copied"}), 200
@@ -719,35 +747,35 @@ def webhook():
         if text.startswith('/broadcast'):
             if user_id == ADMIN_TELEGRAM_ID:
                 USER_STATE[chat_id] = {'step': 'broadcast_message'}
-                send_message(chat_id, "➡️ **ADMIN BROADCAST:** Send the message you want to broadcast to the group.")
+                send_message(chat_id, "➡️ ADMIN BROADCAST: Send the message you want to broadcast to the group.", parse_mode=None)
             else:
-                send_message(chat_id, "❌ **Access Denied.** This command is for administrators only.", START_KEYBOARD)
+                send_message(chat_id, "❌ Access Denied. This command is for administrators only.", START_KEYBOARD, parse_mode=None)
             return jsonify({"status": "ok"}), 200 
             
         elif text.startswith('/start'):
             USER_STATE[chat_id] = {'step': 'main'}
-            send_message(chat_id, f"🚀 Welcome back, Admin! What would you like to do in *{PRODUCT_NAME}*?", START_KEYBOARD)
+            send_message(chat_id, f"🚀 Welcome back, Admin! What would you like to do in {PRODUCT_NAME}?", START_KEYBOARD, parse_mode=None)
             
         elif text.startswith('/add'):
             USER_STATE[chat_id] = {'step': 'add_title', 'data': {'links': []}}
-            send_message(chat_id, "➡️ **ADD Content:** Please send the **Title** of the content.")
+            send_message(chat_id, "➡️ ADD Content: Please send the Title of the content.", parse_mode=None)
             
         elif text.startswith('/edit'):
             USER_STATE[chat_id] = {'step': 'edit_id', 'data': {}}
-            send_message(chat_id, "➡️ **EDIT Content:** Please send the **Content ID** you want to edit.")
+            send_message(chat_id, "➡️ EDIT Content: Please send the Content ID you want to edit.", parse_mode=None)
             
         elif text.startswith('/delete'):
             USER_STATE[chat_id] = {'step': 'delete_id', 'data': {}}
-            send_message(chat_id, "➡️ **DELETE Content:** Please send the **Content ID** to confirm deletion.")
+            send_message(chat_id, "➡️ DELETE Content: Please send the Content ID to confirm deletion.", parse_mode=None)
             
         elif text.startswith('/cancel'):
             USER_STATE[chat_id] = {'step': 'main'}
-            send_message(chat_id, "Operation cancelled. Choose a new action:", START_KEYBOARD)
+            send_message(chat_id, "Operation cancelled. Choose a new action:", START_KEYBOARD, parse_mode=None)
             
         # 5. LIST FILES COMMAND
         elif text.startswith('/files'):
             if content_collection is None:
-                send_message(chat_id, "❌ Database is currently unavailable.")
+                send_message(chat_id, "❌ Database is currently unavailable.", parse_mode=None)
                 return jsonify({"status": "ok"}), 200
                 
             try:
@@ -758,22 +786,22 @@ def webhook():
                 for i, doc in enumerate(content_cursor):
                     title = doc.get('title', 'No Title')
                     _id = str(doc['_id'])
-                    content_list_text.append(f"*{i+1}. {title}* (`{_id}`)")
+                    content_list_text.append(f"{i+1}. {title} ({_id})")
                     
                 if content_list_text:
-                    response_text = "📚 **Latest 10 Content Items (Title & ID):**\n\n" + "\n".join(content_list_text)
+                    response_text = "📚 Latest 10 Content Items (Title & ID):\n\n" + "\n".join(content_list_text)
                 else:
                     response_text = "No content has been uploaded yet."
                 
-                send_message(chat_id, response_text, START_KEYBOARD)
+                send_message(chat_id, response_text, START_KEYBOARD, parse_mode=None)
             except Exception as e:
                 logger.error(f"Error fetching files list: {e}")
-                send_message(chat_id, "❌ An error occurred while fetching the file list.")
+                send_message(chat_id, "❌ An error occurred while fetching the file list.", parse_mode=None)
         
         # 6. POST RANDOM CONTENT COMMAND
         elif text.startswith('/post'):
             if content_collection is None:
-                send_message(chat_id, "❌ Database is currently unavailable.")
+                send_message(chat_id, "❌ Database is currently unavailable.", parse_mode=None)
                 return jsonify({"status": "ok"}), 200
 
             try:
@@ -781,7 +809,7 @@ def webhook():
                 total_content = content_collection.count_documents({})
                 
                 if total_content == 0:
-                    send_message(chat_id, "❌ No content found in the database to post.", START_KEYBOARD)
+                    send_message(chat_id, "❌ No content found in the database to post.", START_KEYBOARD, parse_mode=None)
                     return jsonify({"status": "ok"}), 200
                     
                 # Calculate the limit: 1/5th of total, capped at 5 and floored at 1.
@@ -789,12 +817,12 @@ def webhook():
                 post_limit = max(1, min(5, calculated_limit)) # Dynamic limit logic
                 
                 # Inform user about the determined limit
-                send_message(chat_id, f"⏳ Total Content: {total_content}. Fetching **{post_limit}** random items and initiating posts to the group...")
+                send_message(chat_id, f"⏳ Total Content: {total_content}. Fetching {post_limit} random items and initiating posts to the group...", parse_mode=None)
 
                 random_items = get_random_content(post_limit) # Use the dynamic limit
                 
                 if not random_items:
-                    send_message(chat_id, "❌ No content found in the database to post (check count).", START_KEYBOARD)
+                    send_message(chat_id, "❌ No content found in the database to post (check count).", START_KEYBOARD, parse_mode=None)
                     return jsonify({"status": "ok"}), 200
 
                 posted_count = 0
@@ -806,11 +834,11 @@ def webhook():
                     ).start()
                     posted_count += 1
                     
-                send_message(chat_id, f"✅ **Success!** Initiated posting of {posted_count} random content items to the group. Check the group for updates.", START_KEYBOARD)
+                send_message(chat_id, f"✅ Success! Initiated posting of {posted_count} random content items to the group. Check the group for updates.", START_KEYBOARD, parse_mode=None)
 
             except Exception as e:
                 logger.error(f"Error handling /post command: {e}")
-                send_message(chat_id, "❌ An error occurred while trying to post content.", START_KEYBOARD)
+                send_message(chat_id, "❌ An error occurred while trying to post content.", START_KEYBOARD, parse_mode=None)
                 
             return jsonify({"status": "ok"}), 200
 
@@ -819,35 +847,35 @@ def webhook():
         # 7. BROADCAST FLOW HANDLER
         elif user_state['step'] == 'broadcast_message':
             broadcast_text = text
-            send_message(GROUP_TELEGRAM_ID, f"📢 **ADMIN ANNOUNCEMENT**:\n\n{broadcast_text}")
-            send_message(chat_id, "✅ Message broadcasted to the group successfully.", START_KEYBOARD)
+            send_message(GROUP_TELEGRAM_ID, f"📢 ADMIN ANNOUNCEMENT:\n\n{broadcast_text}", parse_mode=None)
+            send_message(chat_id, "✅ Message broadcasted to the group successfully.", START_KEYBOARD, parse_mode=None)
             USER_STATE[chat_id] = {'step': 'main'}
 
         elif user_state['step'] == 'add_title':
             user_state['data']['title'] = text
             user_state['step'] = 'add_type'
-            send_message(chat_id, "✅ Title saved. Now send the **Type** (e.g., `movie` or `series`).")
+            send_message(chat_id, "✅ Title saved. Now send the Type (e.g., movie or series).", parse_mode=None)
             
         elif user_state['step'] == 'add_type':
             user_state['data']['type'] = text
             user_state['step'] = 'add_thumbnail' 
-            send_message(chat_id, "✅ Type saved. Now send the **Thumbnail URL**.") 
+            send_message(chat_id, "✅ Type saved. Now send the Thumbnail URL.", parse_mode=None) 
             
         elif user_state['step'] == 'add_thumbnail':
             user_state['data']['thumbnail_url'] = text
             user_state['step'] = 'add_tags'
-            send_message(chat_id, "✅ URL saved. Now send **Tags** (comma-separated, e.g., `action, thriller, new`).")
+            send_message(chat_id, "✅ URL saved. Now send Tags (comma-separated, e.g., action, thriller, new).", parse_mode=None)
             
         elif user_state['step'] == 'add_tags':
             user_state['data']['tags'] = text
             user_state['step'] = 'add_episode_title'
-            send_message(chat_id, "✅ Tags saved. Now, send the **Episode Title** (e.g., 'Episode 1' or 'Main Link'). Type **DONE** to finish.")
+            send_message(chat_id, "✅ Tags saved. Now, send the Episode Title (e.g., 'Episode 1' or 'Main Link'). Type DONE to finish.", parse_mode=None)
             
         # --- Sequential Link Input ---
         elif user_state['step'] == 'add_episode_title':
             if text.upper() == 'DONE':
                 if not user_state['data']['links']:
-                    send_message(chat_id, "❌ Cannot save content without any links. Please add at least one link or type **/cancel**.")
+                    send_message(chat_id, "❌ Cannot save content without any links. Please add at least one link or type /cancel.", parse_mode=None)
                     return jsonify({"status": "ok"}), 200
 
                 # --- FINAL SAVE ACTION ---
@@ -861,17 +889,17 @@ def webhook():
                     
                     # NOTE: This link shown to the admin in private chat still includes the ID for convenience
                     send_message(chat_id, 
-                                 f"🎉 **Success!** Content '{user_state['data']['title']}' added to {PRODUCT_NAME} with ID: `{content_id}`.\n"
-                                 f"Access content at: `https://{ACCESS_URL}/content/{content_id}`", 
-                                 START_KEYBOARD)
+                                 f"🎉 Success! Content '{user_state['data']['title']}' added to {PRODUCT_NAME} with ID: {content_id}.\n"
+                                 f"Access content at: https://{ACCESS_URL}/content/{content_id}", 
+                                 START_KEYBOARD, parse_mode=None)
                 else:
-                    send_message(chat_id, "❌ **Save Failed.** Check server logs for MongoDB error.", START_KEYBOARD)
+                    send_message(chat_id, "❌ Save Failed. Check server logs for MongoDB error.", START_KEYBOARD, parse_mode=None)
                 
                 USER_STATE[chat_id] = {'step': 'main'}
             else:
                 user_state['data']['current_episode_title'] = text
                 user_state['step'] = 'add_episode_url'
-                send_message(chat_id, f"✅ Episode Title saved. Now send the **URL** for '{text}'.")
+                send_message(chat_id, f"✅ Episode Title saved. Now send the URL for '{text}'.", parse_mode=None)
 
         elif user_state['step'] == 'add_episode_url':
             episode_title = user_state['data'].pop('current_episode_title', 'Link')
@@ -898,7 +926,7 @@ def webhook():
             })
             
             user_state['step'] = 'add_episode_title'
-            send_message(chat_id, f"✅ Link saved. Current links: {len(user_state['data']['links'])}. Send the **NEXT Episode Title** or type **DONE**.")
+            send_message(chat_id, f"✅ Link saved. Current links: {len(user_state['data']['links'])}. Send the NEXT Episode Title or type DONE.", parse_mode=None)
             
         # --- EDIT FLOW ---
         
@@ -914,26 +942,26 @@ def webhook():
                 keyboard_buttons.append([{'text': '/cancel'}])
 
                 info_text = (
-                    f"🔍 **Editing Content ID**: `{content_id}`\n\n"
-                    f"**Current Title**: {content_doc.get('title', 'N/A')}\n"
-                    f"**Current Type**: {content_doc.get('type', 'N/A')}\n\n" 
+                    f"🔍 Editing Content ID: {content_id}\n\n"
+                    f"Current Title: {content_doc.get('title', 'N/A')}\n"
+                    f"Current Type: {content_doc.get('type', 'N/A')}\n\n" 
                     "Please select a field to update:"
                 )
                 
-                send_message(chat_id, info_text, {'keyboard': keyboard_buttons, 'resize_keyboard': True})
+                send_message(chat_id, info_text, {'keyboard': keyboard_buttons, 'resize_keyboard': True}, parse_mode=None)
             else:
-                send_message(chat_id, "❌ Content ID not found or invalid. Try again or type **/cancel**.")
+                send_message(chat_id, "❌ Content ID not found or invalid. Try again or type /cancel.", parse_mode=None)
 
         # --- Generic Edit Field Handlers ---
         elif user_state['step'] == 'edit_field' and text.startswith('/edit_'):
             field = text.split('_', 1)[1]
             user_state['step'] = f'edit_new_{field}'
             
-            prompt = f"➡️ Please send the **NEW value** for **{field.replace('_', ' ').title()}**."
+            prompt = f"➡️ Please send the NEW value for {field.replace('_', ' ').title()}."
             if field == 'links':
-                 prompt += "\n(For Links, send the **complete, updated list** of JSON links, or the single new URL for a movie.)"
+                 prompt += "\n(For Links, send the complete, updated list of JSON links, or the single new URL for a movie.)"
                  
-            send_message(chat_id, prompt)
+            send_message(chat_id, prompt, parse_mode=None)
             
         # --- Specific Edit Field Value Handlers ---
         elif user_state['step'].startswith('edit_new_'):
@@ -973,9 +1001,9 @@ def webhook():
                 update_data['thumbnail_url'] = text
             
             if update_content(content_id, update_data):
-                send_message(chat_id, f"✅ **Success!** {field.replace('_', ' ').title()} for ID `{content_id}` updated.", START_KEYBOARD)
+                send_message(chat_id, f"✅ Success! {field.replace('_', ' ').title()} for ID {content_id} updated.", START_KEYBOARD, parse_mode=None)
             else:
-                send_message(chat_id, "❌ **Update Failed.** Content not found or no changes made.", START_KEYBOARD)
+                send_message(chat_id, "❌ Update Failed. Content not found or no changes made.", START_KEYBOARD, parse_mode=None)
 
             USER_STATE[chat_id] = {'step': 'main'}
 
@@ -987,11 +1015,11 @@ def webhook():
                 result = content_collection.delete_one({"_id": ObjectId(content_id)})
                 if result.deleted_count > 0:
                     content_cache.clear()
-                    send_message(chat_id, f"🗑️ **Success!** Content ID `{content_id}` has been deleted.", START_KEYBOARD)
+                    send_message(chat_id, f"🗑️ Success! Content ID {content_id} has been deleted.", START_KEYBOARD, parse_mode=None)
                 else:
-                    send_message(chat_id, f"❌ **Error:** Content ID `{content_id}` not found.", START_KEYBOARD)
+                    send_message(chat_id, f"❌ Error: Content ID {content_id} not found.", START_KEYBOARD, parse_mode=None)
             except Exception:
-                send_message(chat_id, "❌ **Error:** Invalid Content ID format.", START_KEYBOARD)
+                send_message(chat_id, "❌ Error: Invalid Content ID format.", START_KEYBOARD, parse_mode=None)
 
             USER_STATE[chat_id] = {'step': 'main'}
             
