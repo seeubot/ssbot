@@ -17,6 +17,7 @@ import tempfile
 import subprocess
 from PIL import Image
 import io
+import shutil
 
 # --- CONSTANTS & CONFIGURATION ---
 ADMIN_TELEGRAM_ID = 1352497419
@@ -211,111 +212,74 @@ def download_video_file(file_id):
         logger.error(f"Error downloading video: {e}")
         return None
 
-def get_video_duration(video_path):
-    """Get video duration using ffprobe"""
+def extract_video_thumbnail_telegram(file_id):
+    """Use Telegram's built-in thumbnail if available"""
     try:
-        cmd = [
-            'ffprobe',
-            '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            video_path
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        duration = float(result.stdout.strip())
+        get_file_url = f"{TELEGRAM_API}getFile?file_id={file_id}"
+        response = requests.get(get_file_url, timeout=30)
+        
+        if response.ok:
+            result = response.json().get('result', {})
+            thumb_file_id = result.get('thumb', {}).get('file_id') if isinstance(result.get('thumb'), dict) else None
+            
+            if thumb_file_id:
+                return thumb_file_id
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error extracting Telegram thumbnail: {e}")
+        return None
+
+def get_video_duration_from_telegram(message):
+    """Get video duration from Telegram message metadata"""
+    try:
+        video_data = message.get('video', {})
+        duration = video_data.get('duration', 300)  # Default 5 minutes
         return duration
     except Exception as e:
-        logger.error(f"Error getting video duration: {e}")
-        return 60  # Default fallback
+        logger.error(f"Error getting duration from Telegram: {e}")
+        return 300
 
-def generate_thumbnail_at_time(video_path, timestamp, output_path):
-    """Generate thumbnail at specific timestamp using ffmpeg"""
+def create_placeholder_thumbnails():
+    """Create placeholder thumbnails when ffmpeg is not available"""
     try:
-        cmd = [
-            'ffmpeg',
-            '-ss', str(timestamp),
-            '-i', video_path,
-            '-vframes', '1',
-            '-q:v', '2',
-            '-y',
-            output_path
-        ]
-        subprocess.run(cmd, capture_output=True, timeout=30, check=True)
-        return os.path.exists(output_path)
-    except Exception as e:
-        logger.error(f"Error generating thumbnail at {timestamp}s: {e}")
-        return False
-
-def create_combined_thumbnail(thumbnail_paths, output_path):
-    """Create a combined image from 5 thumbnails in a grid"""
-    try:
-        images = [Image.open(path) for path in thumbnail_paths]
-        
-        # Resize all to same dimensions
-        width, height = 320, 180
-        images = [img.resize((width, height), Image.Resampling.LANCZOS) for img in images]
-        
-        # Create combined image (2x3 grid, with last row having only 1 centered)
-        combined_width = width * 3
-        combined_height = height * 2
-        combined = Image.new('RGB', (combined_width, combined_height), (0, 0, 0))
-        
-        # Place thumbnails
-        positions = [
-            (0, 0), (width, 0), (width * 2, 0),  # Top row
-            (width // 2, height), (int(width * 1.5), height)  # Bottom row (centered)
-        ]
-        
-        for img, pos in zip(images, positions):
-            combined.paste(img, pos)
-        
-        combined.save(output_path, 'JPEG', quality=85)
-        logger.info(f"Combined thumbnail created: {output_path}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error creating combined thumbnail: {e}")
-        return False
-
-def generate_thumbnails(video_path):
-    """Generate 5 individual thumbnails + 1 combined thumbnail"""
-    try:
-        duration = get_video_duration(video_path)
-        logger.info(f"Video duration: {duration}s")
-        
-        # Calculate timestamps for 5 samples
-        timestamps = [
-            duration * 0.1,   # 10% into video
-            duration * 0.3,   # 30%
-            duration * 0.5,   # 50% (middle)
-            duration * 0.7,   # 70%
-            duration * 0.9    # 90%
-        ]
-        
         thumbnail_paths = []
         temp_dir = tempfile.gettempdir()
         
-        # Generate individual thumbnails
-        for i, ts in enumerate(timestamps):
-            output_path = os.path.join(temp_dir, f'thumb_{i}.jpg')
-            if generate_thumbnail_at_time(video_path, ts, output_path):
-                thumbnail_paths.append(output_path)
+        # Create 6 simple placeholder images
+        for i in range(6):
+            img = Image.new('RGB', (640, 360), color=(50, 50, 50))
+            from PIL import ImageDraw, ImageFont
+            draw = ImageDraw.Draw(img)
+            
+            if i < 5:
+                text = f"Sample {i+1}"
             else:
-                logger.warning(f"Failed to generate thumbnail {i}")
+                text = "Combined View"
+            
+            # Try to use default font
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
+            except:
+                font = ImageFont.load_default()
+            
+            # Get text size and center it
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            position = ((640 - text_width) // 2, (360 - text_height) // 2)
+            
+            draw.text(position, text, fill=(255, 255, 255), font=font)
+            
+            output_path = os.path.join(temp_dir, f'placeholder_thumb_{int(time.time())}_{i}.jpg')
+            img.save(output_path, 'JPEG', quality=85)
+            thumbnail_paths.append(output_path)
         
-        if len(thumbnail_paths) < 5:
-            logger.error("Failed to generate all thumbnails")
-            return None
-        
-        # Create combined thumbnail
-        combined_path = os.path.join(temp_dir, 'combined_thumb.jpg')
-        if create_combined_thumbnail(thumbnail_paths, combined_path):
-            thumbnail_paths.append(combined_path)
-        
+        logger.info(f"Created {len(thumbnail_paths)} placeholder thumbnails")
         return thumbnail_paths
         
     except Exception as e:
-        logger.error(f"Error in generate_thumbnails: {e}")
+        logger.error(f"Error creating placeholder thumbnails: {e}")
         return None
 
 # --- SIMPLIFIED TELEGRAM FUNCTIONS ---
