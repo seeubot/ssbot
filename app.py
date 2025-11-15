@@ -13,6 +13,10 @@ import threading
 from cachetools import TTLCache
 import pymongo.operations 
 import urllib.parse
+import tempfile
+import subprocess
+from PIL import Image
+import io
 
 # --- CONSTANTS & CONFIGURATION ---
 ADMIN_TELEGRAM_ID = 1352497419
@@ -165,11 +169,154 @@ GROUP_WELCOME_SENT = set()
 START_KEYBOARD = {
     'keyboard': [
         [{'text': '/add'}, {'text': '/edit'}, {'text': '/delete'}, {'text': '/files'}], 
-        [{'text': '/post'}, {'text': '/broadcast'}, {'text': '/cancel'}] 
+        [{'text': '/post_diskwala'}, {'text': '/broadcast'}, {'text': '/cancel'}] 
     ],
     'resize_keyboard': True,
     'one_time_keyboard': False
 }
+
+# --- VIDEO THUMBNAIL GENERATION ---
+
+def download_video_file(file_id):
+    """Download video file from Telegram"""
+    try:
+        # Get file path
+        get_file_url = f"{TELEGRAM_API}getFile?file_id={file_id}"
+        response = requests.get(get_file_url, timeout=30)
+        
+        if not response.ok:
+            logger.error(f"Failed to get file info: {response.text}")
+            return None
+            
+        file_path = response.json()['result']['file_path']
+        
+        # Download file
+        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        video_response = requests.get(download_url, timeout=120, stream=True)
+        
+        if not video_response.ok:
+            logger.error(f"Failed to download video: {video_response.text}")
+            return None
+        
+        # Save to temp file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+        for chunk in video_response.iter_content(chunk_size=8192):
+            temp_file.write(chunk)
+        temp_file.close()
+        
+        logger.info(f"Video downloaded to: {temp_file.name}")
+        return temp_file.name
+        
+    except Exception as e:
+        logger.error(f"Error downloading video: {e}")
+        return None
+
+def get_video_duration(video_path):
+    """Get video duration using ffprobe"""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            video_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        duration = float(result.stdout.strip())
+        return duration
+    except Exception as e:
+        logger.error(f"Error getting video duration: {e}")
+        return 60  # Default fallback
+
+def generate_thumbnail_at_time(video_path, timestamp, output_path):
+    """Generate thumbnail at specific timestamp using ffmpeg"""
+    try:
+        cmd = [
+            'ffmpeg',
+            '-ss', str(timestamp),
+            '-i', video_path,
+            '-vframes', '1',
+            '-q:v', '2',
+            '-y',
+            output_path
+        ]
+        subprocess.run(cmd, capture_output=True, timeout=30, check=True)
+        return os.path.exists(output_path)
+    except Exception as e:
+        logger.error(f"Error generating thumbnail at {timestamp}s: {e}")
+        return False
+
+def create_combined_thumbnail(thumbnail_paths, output_path):
+    """Create a combined image from 5 thumbnails in a grid"""
+    try:
+        images = [Image.open(path) for path in thumbnail_paths]
+        
+        # Resize all to same dimensions
+        width, height = 320, 180
+        images = [img.resize((width, height), Image.Resampling.LANCZOS) for img in images]
+        
+        # Create combined image (2x3 grid, with last row having only 1 centered)
+        combined_width = width * 3
+        combined_height = height * 2
+        combined = Image.new('RGB', (combined_width, combined_height), (0, 0, 0))
+        
+        # Place thumbnails
+        positions = [
+            (0, 0), (width, 0), (width * 2, 0),  # Top row
+            (width // 2, height), (int(width * 1.5), height)  # Bottom row (centered)
+        ]
+        
+        for img, pos in zip(images, positions):
+            combined.paste(img, pos)
+        
+        combined.save(output_path, 'JPEG', quality=85)
+        logger.info(f"Combined thumbnail created: {output_path}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error creating combined thumbnail: {e}")
+        return False
+
+def generate_thumbnails(video_path):
+    """Generate 5 individual thumbnails + 1 combined thumbnail"""
+    try:
+        duration = get_video_duration(video_path)
+        logger.info(f"Video duration: {duration}s")
+        
+        # Calculate timestamps for 5 samples
+        timestamps = [
+            duration * 0.1,   # 10% into video
+            duration * 0.3,   # 30%
+            duration * 0.5,   # 50% (middle)
+            duration * 0.7,   # 70%
+            duration * 0.9    # 90%
+        ]
+        
+        thumbnail_paths = []
+        temp_dir = tempfile.gettempdir()
+        
+        # Generate individual thumbnails
+        for i, ts in enumerate(timestamps):
+            output_path = os.path.join(temp_dir, f'thumb_{i}.jpg')
+            if generate_thumbnail_at_time(video_path, ts, output_path):
+                thumbnail_paths.append(output_path)
+            else:
+                logger.warning(f"Failed to generate thumbnail {i}")
+        
+        if len(thumbnail_paths) < 5:
+            logger.error("Failed to generate all thumbnails")
+            return None
+        
+        # Create combined thumbnail
+        combined_path = os.path.join(temp_dir, 'combined_thumb.jpg')
+        if create_combined_thumbnail(thumbnail_paths, combined_path):
+            thumbnail_paths.append(combined_path)
+        
+        return thumbnail_paths
+        
+    except Exception as e:
+        logger.error(f"Error in generate_thumbnails: {e}")
+        return None
 
 # --- SIMPLIFIED TELEGRAM FUNCTIONS ---
 
@@ -207,7 +354,7 @@ def send_telegram_request(method, payload):
         
         if result.get('ok'):
             logger.info(f"Telegram {method} successful")
-            return True
+            return result.get('result')
         else:
             logger.error(f"Telegram API error: {result}")
             return False
@@ -229,16 +376,50 @@ def send_message(chat_id, text, reply_markup=None):
     
     return send_telegram_request('sendMessage', payload)
 
-def send_photo(chat_id, photo_url, caption=None):
-    """Send photo to Telegram"""
-    payload = {
-        'chat_id': chat_id,
-        'photo': photo_url,
-        'caption': caption,
-        'parse_mode': None  # Plain text only
-    }
-    
-    return send_telegram_request('sendPhoto', payload)
+def send_photo(chat_id, photo_file_path, caption=None, reply_markup=None):
+    """Send photo file to Telegram"""
+    try:
+        url = f"{TELEGRAM_API}sendPhoto"
+        
+        with open(photo_file_path, 'rb') as photo_file:
+            files = {'photo': photo_file}
+            data = {'chat_id': chat_id}
+            
+            if caption:
+                data['caption'] = caption
+            
+            if reply_markup:
+                data['reply_markup'] = json.dumps(reply_markup)
+            
+            response = requests.post(url, files=files, data=data, timeout=30)
+            
+            if response.ok:
+                logger.info("Photo sent successfully")
+                return response.json().get('result')
+            else:
+                logger.error(f"Failed to send photo: {response.text}")
+                return False
+                
+    except Exception as e:
+        logger.error(f"Error sending photo: {e}")
+        return False
+
+def send_media_group(chat_id, media_list):
+    """Send multiple photos as media group"""
+    try:
+        # First upload photos and get file_ids
+        file_ids = []
+        for photo_path in media_list:
+            result = send_photo(chat_id, photo_path, None)
+            if result and 'photo' in result:
+                # Get the largest photo file_id
+                file_ids.append(result['photo'][-1]['file_id'])
+        
+        return len(file_ids) == len(media_list)
+        
+    except Exception as e:
+        logger.error(f"Error sending media group: {e}")
+        return False
 
 def copy_message(chat_id, from_chat_id, message_id, caption=None):
     """Copy message between chats"""
@@ -252,22 +433,24 @@ def copy_message(chat_id, from_chat_id, message_id, caption=None):
     
     return send_telegram_request('copyMessage', payload)
 
-def send_group_notification(title, thumbnail_url, content_id):
-    """Send notification to group - simplified version"""
+def send_diskwala_post(diskwala_url, thumbnail_url=None):
+    """Send DiskWala link to group with optional thumbnail"""
     if not TELEGRAM_API or GROUP_TELEGRAM_ID is None:
-        return
+        return False
 
-    watch_link = f"https://{ACCESS_URL}"
-    caption = f"🔥 NEW RELEASE! 🔥\n\n{title} has been added to {PRODUCT_NAME}!\n\nAccess: {ACCESS_URL}"
+    message_text = f"🔥 NEW RELEASE! 🔥\n\nWatch Now: {diskwala_url}\n\nPowered by {PRODUCT_NAME}"
     
-    # Try to send as photo first
     if thumbnail_url and thumbnail_url.startswith(('http://', 'https://')):
-        success = send_photo(GROUP_TELEGRAM_ID, thumbnail_url, caption)
+        success = send_telegram_request('sendPhoto', {
+            'chat_id': GROUP_TELEGRAM_ID,
+            'photo': thumbnail_url,
+            'caption': message_text
+        })
         if success:
-            return
+            return True
     
     # Fallback to text message
-    send_message(GROUP_TELEGRAM_ID, caption)
+    return send_message(GROUP_TELEGRAM_ID, message_text)
 
 # --- CONTENT MANAGEMENT FUNCTIONS ---
 
@@ -550,7 +733,7 @@ def admin_delete_content(content_id):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Complete webhook handler with all commands"""
+    """Complete webhook handler with video thumbnail generation"""
     if not BOT_TOKEN:
         return jsonify({"status": "telegram not configured"}), 200
         
@@ -573,10 +756,95 @@ def webhook():
             send_message(chat_id, "❌ Access Denied. Only administrator can use this bot.")
             return jsonify({"status": "unauthorized"}), 200
         
-        # Handle media files - copy to channel with numbering
-        has_media = any(key in message for key in ['photo', 'video', 'document', 'audio', 'sticker', 'animation', 'voice'])
+        # Handle video files - generate thumbnails
+        if 'video' in message and chat_id > 0 and user_id == ADMIN_TELEGRAM_ID:
+            send_message(chat_id, "⏳ Processing video and generating thumbnails...")
+            
+            video_file_id = message['video']['file_id']
+            
+            # Download video
+            video_path = download_video_file(video_file_id)
+            
+            if not video_path:
+                send_message(chat_id, "❌ Failed to download video file.")
+                return jsonify({"status": "ok"}), 200
+            
+            # Generate thumbnails
+            thumbnail_paths = generate_thumbnails(video_path)
+            
+            if not thumbnail_paths:
+                send_message(chat_id, "❌ Failed to generate thumbnails.")
+                os.unlink(video_path)
+                return jsonify({"status": "ok"}), 200
+            
+            # Send thumbnails to admin
+            send_message(chat_id, f"✅ Generated {len(thumbnail_paths)} thumbnails (5 samples + 1 combined):")
+            
+            for i, thumb_path in enumerate(thumbnail_paths):
+                caption = f"Combined Thumbnails" if i == 5 else f"Sample {i+1}"
+                send_photo(chat_id, thumb_path, caption)
+                time.sleep(0.5)
+            
+            # Store thumbnails for later use
+            USER_STATE[chat_id] = {
+                'step': 'awaiting_diskwala_url',
+                'thumbnail_paths': thumbnail_paths,
+                'video_path': video_path
+            }
+            
+            send_message(chat_id, "📎 Now send me the DiskWala URL to post to the group:")
+            
+            return jsonify({"status": "video processed"}), 200
         
-        if chat_id > 0 and user_id == ADMIN_TELEGRAM_ID and has_media:
+        # Handle awaiting DiskWala URL
+        if user_state.get('step') == 'awaiting_diskwala_url':
+            diskwala_url = text.strip()
+            
+            if not diskwala_url.startswith('http'):
+                send_message(chat_id, "❌ Please send a valid URL starting with http:// or https://")
+                return jsonify({"status": "ok"}), 200
+            
+            # Get the combined thumbnail (last one)
+            thumbnail_paths = user_state.get('thumbnail_paths', [])
+            
+            if thumbnail_paths:
+                # Upload combined thumbnail to Telegram to get URL
+                combined_thumb = thumbnail_paths[-1]
+                result = send_photo(ADMIN_TELEGRAM_ID, combined_thumb, "Thumbnail for posting")
+                
+                # Post to group
+                send_diskwala_post(diskwala_url)
+                
+                # Copy video to CONTENT_FORWARD_CHANNEL_ID with numbering
+                sequence_number = get_next_sequence_value("content_post_sequence")
+                video_caption = f"#{sequence_number}\n\n{PRODUCT_NAME}\n\nWatch: {diskwala_url}"
+                
+                # Copy original video message to channel
+                copy_message(
+                    CONTENT_FORWARD_CHANNEL_ID,
+                    chat_id,
+                    message['message_id'],
+                    video_caption
+                )
+                
+                send_message(chat_id, f"✅ Posted to group and copied to channel as #{sequence_number}!", START_KEYBOARD)
+                
+                # Cleanup temp files
+                video_path = user_state.get('video_path')
+                if video_path and os.path.exists(video_path):
+                    os.unlink(video_path)
+                
+                for thumb_path in thumbnail_paths:
+                    if os.path.exists(thumb_path):
+                        os.unlink(thumb_path)
+            
+            USER_STATE[chat_id] = {'step': 'main'}
+            return jsonify({"status": "diskwala posted"}), 200
+        
+        # Handle other media files (photos, documents, etc.) - copy to channel with numbering
+        has_other_media = any(key in message for key in ['photo', 'document', 'audio', 'sticker', 'animation', 'voice'])
+        
+        if chat_id > 0 and user_id == ADMIN_TELEGRAM_ID and has_other_media:
             sequence_number = get_next_sequence_value("content_post_sequence")
             new_caption = f"#{sequence_number}\n\n{PRODUCT_NAME}"
             
@@ -590,7 +858,10 @@ def webhook():
         # Handle commands
         if text.startswith('/start'):
             USER_STATE[chat_id] = {'step': 'main'}
-            send_message(chat_id, f"🚀 Welcome to {PRODUCT_NAME} Admin Bot! Use the buttons below or type commands.", START_KEYBOARD)
+            send_message(chat_id, f"🚀 Welcome to {PRODUCT_NAME} Admin Bot!\n\n📹 Send me a video to generate thumbnails and post with DiskWala link!\n\nOr use the buttons below:", START_KEYBOARD)
+            
+        elif text.startswith('/post_diskwala'):
+            send_message(chat_id, "📹 Please send me a video file first. I will generate thumbnails and then ask for the DiskWala URL.")
             
         elif text.startswith('/add'):
             USER_STATE[chat_id] = {'step': 'add_title', 'data': {'links': []}}
@@ -629,51 +900,24 @@ def webhook():
                 logger.error(f"Error fetching files list: {e}")
                 send_message(chat_id, "❌ An error occurred while fetching the file list.")
             
-        elif text.startswith('/post'):
-            if content_collection is None:
-                send_message(chat_id, "❌ Database is currently unavailable.")
-                return jsonify({"status": "ok"}), 200
-
-            try:
-                total_content = content_collection.count_documents({})
-                
-                if total_content == 0:
-                    send_message(chat_id, "❌ No content found in the database to post.", START_KEYBOARD)
-                    return jsonify({"status": "ok"}), 200
-                    
-                calculated_limit = total_content // 5
-                post_limit = max(1, min(5, calculated_limit))
-                
-                send_message(chat_id, f"⏳ Total Content: {total_content}. Fetching {post_limit} random items...")
-
-                random_items = get_random_content(post_limit)
-                
-                if not random_items:
-                    send_message(chat_id, "❌ No content found in the database to post.", START_KEYBOARD)
-                    return jsonify({"status": "ok"}), 200
-
-                posted_count = 0
-                for item in random_items:
-                    threading.Thread(
-                        target=send_group_notification, 
-                        args=(item.get('title', 'Untitled Content'), item.get('thumbnail_url', ''), item['_id'])
-                    ).start()
-                    posted_count += 1
-                    time.sleep(1)  # Small delay between posts
-                    
-                send_message(chat_id, f"✅ Success! Initiated posting of {posted_count} random content items to the group.", START_KEYBOARD)
-
-            except Exception as e:
-                logger.error(f"Error handling /post command: {e}")
-                send_message(chat_id, "❌ An error occurred while trying to post content.", START_KEYBOARD)
-                
         elif text.startswith('/broadcast'):
             USER_STATE[chat_id] = {'step': 'broadcast_message'}
             send_message(chat_id, "➡️ BROADCAST: Send the message you want to broadcast to the group.")
             
         elif text.startswith('/cancel'):
+            # Cleanup any temp files
+            if user_state.get('video_path'):
+                video_path = user_state.get('video_path')
+                if os.path.exists(video_path):
+                    os.unlink(video_path)
+            
+            if user_state.get('thumbnail_paths'):
+                for thumb_path in user_state.get('thumbnail_paths', []):
+                    if os.path.exists(thumb_path):
+                        os.unlink(thumb_path)
+            
             USER_STATE[chat_id] = {'step': 'main'}
-            send_message(chat_id, "Operation cancelled. Choose a new action:", START_KEYBOARD)
+            send_message(chat_id, "❌ Operation cancelled. Choose a new action:", START_KEYBOARD)
             
         # Multi-step conversation handlers
         elif user_state['step'] == 'broadcast_message':
@@ -710,11 +954,6 @@ def webhook():
 
                 content_id = save_content(user_state['data'])
                 if content_id:
-                    threading.Thread(
-                        target=send_group_notification,
-                        args=(user_state['data']['title'], user_state['data']['thumbnail_url'], content_id)
-                    ).start()
-                    
                     send_message(chat_id, 
                                  f"🎉 Success! Content '{user_state['data']['title']}' added to {PRODUCT_NAME} with ID: {content_id}.\n"
                                  f"Access content at: https://{ACCESS_URL}/content/{content_id}", 
@@ -838,7 +1077,7 @@ def webhook():
             
         else:
             # If no command matched, show help
-            send_message(chat_id, "Use /start to see available commands or use the keyboard buttons.")
+            send_message(chat_id, "📹 Send a video to generate thumbnails and post with DiskWala link, or use /start to see available commands.")
             
         return jsonify({"status": "ok"}), 200
         
