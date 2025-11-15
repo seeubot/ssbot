@@ -13,11 +13,6 @@ import threading
 from cachetools import TTLCache
 import pymongo.operations 
 import urllib.parse
-import tempfile
-import subprocess
-from PIL import Image
-import io
-import shutil
 
 # --- CONSTANTS & CONFIGURATION ---
 ADMIN_TELEGRAM_ID = 1352497419
@@ -166,121 +161,15 @@ CORS(app)
 USER_STATE = {}
 GROUP_WELCOME_SENT = set()
 
-# Keyboard template
+# Keyboard template - ADDED /repost_10
 START_KEYBOARD = {
     'keyboard': [
         [{'text': '/add'}, {'text': '/edit'}, {'text': '/delete'}, {'text': '/files'}], 
-        [{'text': '/post_diskwala'}, {'text': '/broadcast'}, {'text': '/cancel'}] 
+        [{'text': '/post_diskwala'}, {'text': '/repost_10'}, {'text': '/broadcast'}, {'text': '/cancel'}] 
     ],
     'resize_keyboard': True,
     'one_time_keyboard': False
 }
-
-# --- VIDEO THUMBNAIL GENERATION ---
-
-def download_video_file(file_id):
-    """Download video file from Telegram"""
-    try:
-        # Get file path
-        get_file_url = f"{TELEGRAM_API}getFile?file_id={file_id}"
-        response = requests.get(get_file_url, timeout=30)
-        
-        if not response.ok:
-            logger.error(f"Failed to get file info: {response.text}")
-            return None
-            
-        file_path = response.json()['result']['file_path']
-        
-        # Download file
-        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-        video_response = requests.get(download_url, timeout=120, stream=True)
-        
-        if not video_response.ok:
-            logger.error(f"Failed to download video: {video_response.text}")
-            return None
-        
-        # Save to temp file
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-        for chunk in video_response.iter_content(chunk_size=8192):
-            temp_file.write(chunk)
-        temp_file.close()
-        
-        logger.info(f"Video downloaded to: {temp_file.name}")
-        return temp_file.name
-        
-    except Exception as e:
-        logger.error(f"Error downloading video: {e}")
-        return None
-
-def extract_video_thumbnail_telegram(file_id):
-    """Use Telegram's built-in thumbnail if available"""
-    try:
-        get_file_url = f"{TELEGRAM_API}getFile?file_id={file_id}"
-        response = requests.get(get_file_url, timeout=30)
-        
-        if response.ok:
-            result = response.json().get('result', {})
-            thumb_file_id = result.get('thumb', {}).get('file_id') if isinstance(result.get('thumb'), dict) else None
-            
-            if thumb_file_id:
-                return thumb_file_id
-        
-        return None
-    except Exception as e:
-        logger.error(f"Error extracting Telegram thumbnail: {e}")
-        return None
-
-def get_video_duration_from_telegram(message):
-    """Get video duration from Telegram message metadata"""
-    try:
-        video_data = message.get('video', {})
-        duration = video_data.get('duration', 300)  # Default 5 minutes
-        return duration
-    except Exception as e:
-        logger.error(f"Error getting duration from Telegram: {e}")
-        return 300
-
-def create_placeholder_thumbnails():
-    """Create placeholder thumbnails when ffmpeg is not available"""
-    try:
-        thumbnail_paths = []
-        temp_dir = tempfile.gettempdir()
-        
-        # Create 6 simple placeholder images
-        for i in range(6):
-            img = Image.new('RGB', (640, 360), color=(50, 50, 50))
-            from PIL import ImageDraw, ImageFont
-            draw = ImageDraw.Draw(img)
-            
-            if i < 5:
-                text = f"Sample {i+1}"
-            else:
-                text = "Combined View"
-            
-            # Try to use default font
-            try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
-            except:
-                font = ImageFont.load_default()
-            
-            # Get text size and center it
-            bbox = draw.textbbox((0, 0), text, font=font)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            position = ((640 - text_width) // 2, (360 - text_height) // 2)
-            
-            draw.text(position, text, fill=(255, 255, 255), font=font)
-            
-            output_path = os.path.join(temp_dir, f'placeholder_thumb_{int(time.time())}_{i}.jpg')
-            img.save(output_path, 'JPEG', quality=85)
-            thumbnail_paths.append(output_path)
-        
-        logger.info(f"Created {len(thumbnail_paths)} placeholder thumbnails")
-        return thumbnail_paths
-        
-    except Exception as e:
-        logger.error(f"Error creating placeholder thumbnails: {e}")
-        return None
 
 # --- SIMPLIFIED TELEGRAM FUNCTIONS ---
 
@@ -340,8 +229,11 @@ def send_message(chat_id, text, reply_markup=None):
     
     return send_telegram_request('sendMessage', payload)
 
+# NOTE: send_photo is kept simple as it's only used for direct file sending/debug, 
+# main posting uses send_telegram_request with file_id
+
 def send_photo(chat_id, photo_file_path, caption=None, reply_markup=None):
-    """Send photo file to Telegram"""
+    """Send photo file to Telegram (used for files on disk, not file_id)"""
     try:
         url = f"{TELEGRAM_API}sendPhoto"
         
@@ -368,23 +260,6 @@ def send_photo(chat_id, photo_file_path, caption=None, reply_markup=None):
         logger.error(f"Error sending photo: {e}")
         return False
 
-def send_media_group(chat_id, media_list):
-    """Send multiple photos as media group"""
-    try:
-        # First upload photos and get file_ids
-        file_ids = []
-        for photo_path in media_list:
-            result = send_photo(chat_id, photo_path, None)
-            if result and 'photo' in result:
-                # Get the largest photo file_id
-                file_ids.append(result['photo'][-1]['file_id'])
-        
-        return len(file_ids) == len(media_list)
-        
-    except Exception as e:
-        logger.error(f"Error sending media group: {e}")
-        return False
-
 def copy_message(chat_id, from_chat_id, message_id, caption=None):
     """Copy message between chats"""
     payload = {
@@ -397,24 +272,25 @@ def copy_message(chat_id, from_chat_id, message_id, caption=None):
     
     return send_telegram_request('copyMessage', payload)
 
-def send_diskwala_post(diskwala_url, thumbnail_url=None):
-    """Send DiskWala link to group with optional thumbnail"""
+def send_diskwala_post(diskwala_url, title, thumbnail_file_id):
+    """Send DiskWala link to group using a Telegram File ID as thumbnail."""
     if not TELEGRAM_API or GROUP_TELEGRAM_ID is None:
         return False
 
-    message_text = f"🔥 NEW RELEASE! 🔥\n\nWatch Now: {diskwala_url}\n\nPowered by {PRODUCT_NAME}"
+    message_text = (
+        f"🔥 NEW RELEASE: {title} 🔥\n\n"
+        f"Watch Now: {diskwala_url}\n\n"
+        f"Powered by {PRODUCT_NAME}"
+    )
     
-    if thumbnail_url and thumbnail_url.startswith(('http://', 'https://')):
-        success = send_telegram_request('sendPhoto', {
-            'chat_id': GROUP_TELEGRAM_ID,
-            'photo': thumbnail_url,
-            'caption': message_text
-        })
-        if success:
-            return True
+    # Use sendPhoto with the stored file_id
+    success = send_telegram_request('sendPhoto', {
+        'chat_id': GROUP_TELEGRAM_ID,
+        'photo': thumbnail_file_id,
+        'caption': message_text
+    })
     
-    # Fallback to text message
-    return send_message(GROUP_TELEGRAM_ID, message_text)
+    return success
 
 # --- CONTENT MANAGEMENT FUNCTIONS ---
 
@@ -449,11 +325,16 @@ def update_content(content_id, update_data):
         logger.error(f"MongoDB Update Error: {e}")
         return False
 
-def get_random_content(limit=5):
+def get_random_content(limit=10):
+    """Fetches random content that has a telegram_file_id for reposting."""
     if content_collection is None:
         return []
     try:
-        pipeline = [{"$sample": {"size": limit}}]
+        # Only fetch items that have a telegram_file_id for reposting
+        pipeline = [
+            {"$match": {"telegram_file_id": {"$exists": True, "$ne": None}}},
+            {"$sample": {"size": limit}}
+        ]
         random_docs = list(content_collection.aggregate(pipeline))
         
         result = []
@@ -466,15 +347,22 @@ def get_random_content(limit=5):
         return []
 
 def save_content(content_data):
+    """Saves content data, including new fields for DiskWala posting."""
     if content_collection is None: 
         return False
     try:
+        # Clean tags and normalize links
+        tags = [t.strip().lower() for t in content_data.get('tags', '').split(',') if t.strip()]
+        links = content_data.get('links', [])
+        
         document = {
             "title": content_data.get('title'),
             "type": content_data.get('type'),
             "thumbnail_url": content_data.get('thumbnail_url'),
-            "tags": [t.strip().lower() for t in content_data.get('tags', '').split(',') if t.strip()],
-            "links": content_data.get('links', []),
+            "telegram_file_id": content_data.get('telegram_file_id'), # NEW: Stored for reposting
+            "diskwala_url": content_data.get('diskwala_url'),         # NEW: Stored for reposting
+            "tags": tags,
+            "links": links,
             "views": 0,
             "created_at": datetime.utcnow(),
             "last_viewed": datetime.utcnow()
@@ -488,7 +376,33 @@ def save_content(content_data):
         logger.error(f"MongoDB Save Error: {e}")
         return False
 
-# --- FLASK ROUTES ---
+def repost_single_content(doc):
+    """Sends a single content item as a new post to the group."""
+    if GROUP_TELEGRAM_ID is None: return False
+
+    title = doc.get('title', 'Untitled Content')
+    diskwala_url = doc.get('diskwala_url')
+    thumbnail_file_id = doc.get('telegram_file_id') # Use the stored File ID
+
+    if not diskwala_url or not thumbnail_file_id:
+        logger.warning(f"Skipping repost for {doc.get('_id', 'unknown')}: Missing URL or thumbnail.")
+        return False
+
+    message_text = (
+        f"🔄 REPOST: {title}\n\n"
+        f"Watch Now: {diskwala_url}\n\n"
+        f"Powered by {PRODUCT_NAME}"
+    )
+
+    success = send_telegram_request('sendPhoto', {
+        'chat_id': GROUP_TELEGRAM_ID,
+        'photo': thumbnail_file_id,
+        'caption': message_text
+    })
+
+    return success
+
+# --- FLASK ROUTES (Unchanged) ---
 
 @app.route('/', methods=['GET'])
 def index():
@@ -638,7 +552,7 @@ def get_similar_content(tags):
         logger.error(f"API Similar Fetch Error: {e}")
         return jsonify({"success": False, "error": "Failed to retrieve similar content."}), 500
 
-# --- ADMIN ROUTES ---
+# --- ADMIN ROUTES (Unchanged) ---
 
 @app.route('/api/admin/content', methods=['POST'])
 @require_auth
@@ -693,11 +607,11 @@ def admin_delete_content(content_id):
         logger.error(f"Admin content deletion error: {e}")
         return jsonify({"success": False, "error": "Invalid content ID"}), 400
 
-# --- COMPLETE TELEGRAM WEBHOOK HANDLER ---
+# --- COMPLETE TELEGRAM WEBHOOK HANDLER (Updated) ---
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Complete webhook handler with video thumbnail generation"""
+    """Complete webhook handler with new DiskWala and repost logic."""
     if not BOT_TOKEN:
         return jsonify({"status": "telegram not configured"}), 200
         
@@ -720,116 +634,97 @@ def webhook():
             send_message(chat_id, "❌ Access Denied. Only administrator can use this bot.")
             return jsonify({"status": "unauthorized"}), 200
         
-        # Handle video files - generate thumbnails
-        if 'video' in message and chat_id > 0 and user_id == ADMIN_TELEGRAM_ID:
-            send_message(chat_id, "⏳ Processing video and generating thumbnails...")
-            
-            video_file_id = message['video']['file_id']
-            
-            # Download video
-            video_path = download_video_file(video_file_id)
-            
-            if not video_path:
-                send_message(chat_id, "❌ Failed to download video file.")
-                return jsonify({"status": "ok"}), 200
-            
-            # Generate thumbnails
-            thumbnail_paths = generate_thumbnails(video_path)
-            
-            if not thumbnail_paths:
-                send_message(chat_id, "❌ Failed to generate thumbnails.")
-                os.unlink(video_path)
-                return jsonify({"status": "ok"}), 200
-            
-            # Send thumbnails to admin
-            send_message(chat_id, f"✅ Generated {len(thumbnail_paths)} thumbnails (5 samples + 1 combined):")
-            
-            for i, thumb_path in enumerate(thumbnail_paths):
-                caption = f"Combined Thumbnails" if i == 5 else f"Sample {i+1}"
-                send_photo(chat_id, thumb_path, caption)
-                time.sleep(0.5)
-            
-            # Store thumbnails for later use
-            USER_STATE[chat_id] = {
-                'step': 'awaiting_diskwala_url',
-                'thumbnail_paths': thumbnail_paths,
-                'video_path': video_path
-            }
-            
-            send_message(chat_id, "📎 Now send me the DiskWala URL to post to the group:")
-            
-            return jsonify({"status": "video processed"}), 200
-        
-        # Handle awaiting DiskWala URL
-        if user_state.get('step') == 'awaiting_diskwala_url':
+        # --- NEW DiskWala Multi-step conversation handlers ---
+
+        if user_state['step'] == 'awaiting_diskwala_photo':
+            if 'photo' in message:
+                # Get the largest photo file ID
+                photo_file_id = message['photo'][-1]['file_id']
+                # Initialize data dictionary for this flow
+                USER_STATE[chat_id]['data'] = {'telegram_file_id': photo_file_id} 
+                USER_STATE[chat_id]['step'] = 'awaiting_diskwala_title'
+                send_message(chat_id, "✅ Thumbnail saved. Now send the **Title** for the post.")
+            else:
+                send_message(chat_id, "❌ Please send a photo file for the thumbnail.")
+            return jsonify({"status": "ok"}), 200
+
+        elif user_state['step'] == 'awaiting_diskwala_title':
+            USER_STATE[chat_id]['data']['title'] = text.strip()
+            USER_STATE[chat_id]['step'] = 'awaiting_diskwala_url'
+            send_message(chat_id, "✅ Title saved. Now send the **DiskWala URL**.")
+            return jsonify({"status": "ok"}), 200
+
+        elif user_state['step'] == 'awaiting_diskwala_url':
             diskwala_url = text.strip()
             
             if not diskwala_url.startswith('http'):
                 send_message(chat_id, "❌ Please send a valid URL starting with http:// or https://")
                 return jsonify({"status": "ok"}), 200
             
-            # Get the combined thumbnail (last one)
-            thumbnail_paths = user_state.get('thumbnail_paths', [])
+            title = user_state['data']['title']
+            thumbnail_file_id = user_state['data']['telegram_file_id']
             
-            if thumbnail_paths:
-                # Upload combined thumbnail to Telegram to get URL
-                combined_thumb = thumbnail_paths[-1]
-                result = send_photo(ADMIN_TELEGRAM_ID, combined_thumb, "Thumbnail for posting")
-                
-                # Post to group
-                send_diskwala_post(diskwala_url)
-                
-                # Copy video to CONTENT_FORWARD_CHANNEL_ID with numbering
-                sequence_number = get_next_sequence_value("content_post_sequence")
-                video_caption = f"#{sequence_number}\n\n{PRODUCT_NAME}\n\nWatch: {diskwala_url}"
-                
-                # Copy original video message to channel
-                copy_message(
-                    CONTENT_FORWARD_CHANNEL_ID,
-                    chat_id,
-                    message['message_id'],
-                    video_caption
-                )
-                
-                send_message(chat_id, f"✅ Posted to group and copied to channel as #{sequence_number}!", START_KEYBOARD)
-                
-                # Cleanup temp files
-                video_path = user_state.get('video_path')
-                if video_path and os.path.exists(video_path):
-                    os.unlink(video_path)
-                
-                for thumb_path in thumbnail_paths:
-                    if os.path.exists(thumb_path):
-                        os.unlink(thumb_path)
+            send_message(chat_id, "⏳ Posting to group and saving to database...")
+
+            # 1. Post to group
+            post_result = send_diskwala_post(diskwala_url, title, thumbnail_file_id)
             
+            if post_result:
+                # 2. Save post details to database (Simplified save)
+                content_data = {
+                    "title": title,
+                    "type": "video", # Default to video type for DiskWala posts
+                    "thumbnail_url": f"telegram_file_id:{thumbnail_file_id}", # Reference the file ID
+                    "telegram_file_id": thumbnail_file_id, 
+                    "diskwala_url": diskwala_url,
+                    "tags": title.lower().split(), # Use title words as basic tags
+                    "links": [{"url": diskwala_url, "episode_title": "Watch Now"}],
+                }
+                content_id = save_content(content_data)
+
+                if content_id:
+                    send_message(chat_id, 
+                                 f"🎉 Success! Post '{title}' published and saved with ID: {content_id}.", 
+                                 START_KEYBOARD)
+                else:
+                    send_message(chat_id, 
+                                 f"✅ Post published to group. ❌ Failed to save to database.", 
+                                 START_KEYBOARD)
+            else:
+                send_message(chat_id, "❌ Failed to post to Telegram group.", START_KEYBOARD)
+
             USER_STATE[chat_id] = {'step': 'main'}
             return jsonify({"status": "diskwala posted"}), 200
-        
-        # Handle other media files (photos, documents, etc.) - copy to channel with numbering
-        has_other_media = any(key in message for key in ['photo', 'document', 'audio', 'sticker', 'animation', 'voice'])
-        
-        if chat_id > 0 and user_id == ADMIN_TELEGRAM_ID and has_other_media:
-            sequence_number = get_next_sequence_value("content_post_sequence")
-            new_caption = f"#{sequence_number}\n\n{PRODUCT_NAME}"
-            
-            success = copy_message(CONTENT_FORWARD_CHANNEL_ID, chat_id, message['message_id'], new_caption)
-            if success:
-                send_message(chat_id, f"✅ File copied as post #{sequence_number}", START_KEYBOARD)
-            else:
-                send_message(chat_id, "❌ Failed to copy file to channel", START_KEYBOARD)
-            return jsonify({"status": "file processed"}), 200
-        
-        # Handle commands
+
+        # --- Handle Commands ---
         if text.startswith('/start'):
             USER_STATE[chat_id] = {'step': 'main'}
-            send_message(chat_id, f"🚀 Welcome to {PRODUCT_NAME} Admin Bot!\n\n📹 Send me a video to generate thumbnails and post with DiskWala link!\n\nOr use the buttons below:", START_KEYBOARD)
+            send_message(chat_id, f"🚀 Welcome to {PRODUCT_NAME} Admin Bot!\n\nUse /post_diskwala to start the new posting workflow, or /repost_10 to quickly refresh content. Or use the buttons below:", START_KEYBOARD)
             
         elif text.startswith('/post_diskwala'):
-            send_message(chat_id, "📹 Please send me a video file first. I will generate thumbnails and then ask for the DiskWala URL.")
+            USER_STATE[chat_id] = {'step': 'awaiting_diskwala_photo'}
+            send_message(chat_id, "➡️ POST DiskWala: Please send the **Thumbnail Photo** for the new post now.")
+
+        elif text.startswith('/repost_10'):
+            send_message(chat_id, "⏳ Fetching 10 random content items for reposting...")
+            random_items = get_random_content(limit=10)
             
+            if not random_items:
+                send_message(chat_id, "❌ Could not find any content eligible for repost (must be posted via DiskWala flow).", START_KEYBOARD)
+            else:
+                reposted_count = 0
+                for item in random_items:
+                    if repost_single_content(item):
+                        reposted_count += 1
+                        time.sleep(1) # Delay to avoid flood limits
+                
+                send_message(chat_id, f"✅ Repost complete. {reposted_count}/{len(random_items)} items successfully reposted.", START_KEYBOARD)
+            
+            USER_STATE[chat_id] = {'step': 'main'}
+
         elif text.startswith('/add'):
             USER_STATE[chat_id] = {'step': 'add_title', 'data': {'links': []}}
-            send_message(chat_id, "➡️ ADD Content: Please send the Title of the content.")
+            send_message(chat_id, "➡️ ADD Content: Please send the Title of the content (for web app database only).")
             
         elif text.startswith('/edit'):
             USER_STATE[chat_id] = {'step': 'edit_id', 'data': {}}
@@ -869,21 +764,10 @@ def webhook():
             send_message(chat_id, "➡️ BROADCAST: Send the message you want to broadcast to the group.")
             
         elif text.startswith('/cancel'):
-            # Cleanup any temp files
-            if user_state.get('video_path'):
-                video_path = user_state.get('video_path')
-                if os.path.exists(video_path):
-                    os.unlink(video_path)
-            
-            if user_state.get('thumbnail_paths'):
-                for thumb_path in user_state.get('thumbnail_paths', []):
-                    if os.path.exists(thumb_path):
-                        os.unlink(thumb_path)
-            
             USER_STATE[chat_id] = {'step': 'main'}
             send_message(chat_id, "❌ Operation cancelled. Choose a new action:", START_KEYBOARD)
             
-        # Multi-step conversation handlers
+        # Multi-step conversation handlers (from original /add flow)
         elif user_state['step'] == 'broadcast_message':
             broadcast_text = text
             send_message(GROUP_TELEGRAM_ID, f"📢 ADMIN ANNOUNCEMENT:\n\n{broadcast_text}")
@@ -954,7 +838,7 @@ def webhook():
             user_state['step'] = 'add_episode_title'
             send_message(chat_id, f"✅ Link saved. Current links: {len(user_state['data']['links'])}. Send the NEXT Episode Title or type DONE.")
             
-        # EDIT FLOW
+        # EDIT FLOW (Unchanged)
         elif user_state['step'] == 'edit_id':
             content_id = text
             content_doc = get_content_info_for_edit(content_id)
@@ -1024,7 +908,7 @@ def webhook():
 
             USER_STATE[chat_id] = {'step': 'main'}
 
-        # DELETE FLOW
+        # DELETE FLOW (Unchanged)
         elif user_state['step'] == 'delete_id':
             content_id = text
             try:
@@ -1041,15 +925,16 @@ def webhook():
             
         else:
             # If no command matched, show help
-            send_message(chat_id, "📹 Send a video to generate thumbnails and post with DiskWala link, or use /start to see available commands.")
+            send_message(chat_id, "🤔 I don't recognize that command or state. Use /start to see available commands.")
             
         return jsonify({"status": "ok"}), 200
         
     except Exception as e:
         logger.error(f"Webhook error: {e}")
+        send_message(ADMIN_TELEGRAM_ID, f"🚨 Critical Webhook Error: {e}")
         return jsonify({"status": "error"}), 500
 
-# --- BACKGROUND TASKS ---
+# --- BACKGROUND TASKS (Unchanged) ---
 
 def flush_view_cache():
     global view_count_cache
@@ -1083,7 +968,7 @@ def flush_view_cache():
         except Exception as e:
             logger.error(f"Error flushing view cache: {e}")
 
-# --- APPLICATION STARTUP ---
+# --- APPLICATION STARTUP (Unchanged) ---
 
 def set_webhook():
     if not APP_URL or not BOT_TOKEN:
@@ -1127,3 +1012,4 @@ if __name__ == '__main__':
     
     logger.info(f"Starting Flask app on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+
