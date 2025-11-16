@@ -365,6 +365,12 @@ def process_telegram_update(update):
             return
             
         chat_id = message['chat']['id']
+        
+        # IGNORE ALL MESSAGES FROM DISKWALA CHANNEL
+        if chat_id == GROUP_TELEGRAM_ID:
+            logger.info(f"Ignoring message from DiskWala channel (chat_id: {chat_id})")
+            return
+        
         text = message.get('text', '').strip()
         user_id = message['from']['id']
         
@@ -581,7 +587,7 @@ def process_telegram_update(update):
                 else:
                     send_message(chat_id, "❌ Failed to forward message")
             else:
-                send_message(chat_id, "⚠️ Please forward messages from other chats.\n\nType '❌ Cancel' to exit.")
+                send_message(chat_id, "⚠️ Please forward messages from other chats.\n\nType 'Cancel' to exit.")
             return
         
         # --- VIDEO FILES HANDLER ---
@@ -590,13 +596,17 @@ def process_telegram_update(update):
             is_media = 'photo' in message or 'video' in message or 'document' in message
             
             if is_media:
+                # Get the next file number from MongoDB counter
+                file_number = get_next_sequence_value('video_files_counter')
+                
+                # Update user state with incremented count
                 file_count = user_state.get('file_count', 0) + 1
                 USER_STATE[chat_id]['file_count'] = file_count
                 
                 original_message_id = message['message_id']
                 
-                # Generate file caption
-                file_caption = f"📁 File #{file_count}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
+                # Generate file caption with sequential file number
+                file_caption = f"📁 File #{file_number}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
                 
                 # Copy to Video Files channel
                 copy_result = send_telegram_request('copyMessage', {
@@ -607,11 +617,11 @@ def process_telegram_update(update):
                 })
                 
                 if copy_result:
-                    send_message(chat_id, f"✅ File #{file_count} forwarded to Video Files channel!")
+                    send_message(chat_id, f"✅ File #{file_number} forwarded to Video Files channel!")
                 else:
                     send_message(chat_id, "❌ Failed to forward file")
             else:
-                send_message(chat_id, "⚠️ Please send photo, video, or document files.\n\nType '❌ Cancel' to finish.")
+                send_message(chat_id, "⚠️ Please send photo, video, or document files.\n\nType 'Cancel' to finish.")
             return
         
         # Unknown command
