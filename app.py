@@ -258,6 +258,8 @@ def send_media_post(url, title, media_id, media_type):
     return success
 
 # --- CONTENT MANAGEMENT FUNCTIONS (Contains slow MongoDB I/O) ---
+# NOTE: save_content is preserved for DiskWala flow and reposting logic, 
+# but removed from the file forwarding flow as per user request.
 
 def save_content(content_data):
     """Saves content data with new fields for different posting mechanisms."""
@@ -483,7 +485,7 @@ def process_telegram_update(update):
             return
 
             
-        # --- File Forwarding Conversation Handler (UPDATED) ---
+        # --- File Forwarding Conversation Handler (UPDATED to skip DB save and clear caption) ---
 
         elif user_state['step'] == 'awaiting_forward_file':
             is_media = 'photo' in message or 'video' in message or 'document' in message
@@ -491,44 +493,28 @@ def process_telegram_update(update):
             if is_media:
                 original_message_id = message['message_id']
                 
-                send_message(chat_id, "⏳ Copying file to content channel (Forward header hidden)...")
+                send_message(chat_id, "⏳ Copying file to content channel (Forward header hidden and **Caption Removed**)...")
 
-                # 1. Use copyMessage to forward without the "Forwarded from" header
+                # 1. Use copyMessage to copy the file. 
+                # Setting 'caption': "" ensures the original text/caption is not included.
                 copy_result = send_telegram_request('copyMessage', {
                     'chat_id': CONTENT_FORWARD_CHANNEL_ID,
                     'from_chat_id': chat_id, # Source is admin's private chat
-                    'message_id': original_message_id
+                    'message_id': original_message_id,
+                    'caption': "" # Clear the caption/text
                 })
 
                 if copy_result and copy_result.get('message_id'):
                     channel_message_id = copy_result['message_id']
                     
-                    # 2. Save forwarding details (SLOW I/O)
-                    title_text = message.get('caption') or f"Forwarded File {channel_message_id}"
+                    # *** DATABASE SAVING IS SKIPPED AS REQUESTED ***
                     
-                    content_data = {
-                        "title": title_text, 
-                        "type": "file",
-                        "thumbnail_url": "N/A", 
-                        "post_type": "forwarded_file",
-                        "telegram_message_id": channel_message_id, 
-                        "telegram_chat_id": CONTENT_FORWARD_CHANNEL_ID, 
-                        "diskwala_url": f"t.me/c/{str(CONTENT_FORWARD_CHANNEL_ID).lstrip('-100')}/{channel_message_id}",
-                        "tags": ["forwarded", "file"],
-                        "links": [],
-                    }
-                    content_id = save_content(content_data)
-
-                    final_message = ""
-                    if content_id:
-                        final_message = f"🎉 Success! File copied to channel (ID: {channel_message_id}) and saved with ID: {content_id}."
-                    else:
-                        final_message = f"✅ File copied. ❌ **Failed to save to database.**"
+                    final_message = f"🎉 Success! File copied to content channel (Message ID: {channel_message_id})."
                     
                     # Transition to the continuation state
                     USER_STATE[chat_id]['step'] = 'awaiting_file_continue'
                     send_message(chat_id, 
-                                final_message + "\n\nDo you want to **forward another file**? (Reply **Yes** or **No**)", 
+                                final_message + "\n\nDo you want to **copy another file**? (Reply **Yes** or **No**)", 
                                 )
                 else:
                     send_message(chat_id, "❌ Failed to copy file to content channel. Check bot permissions.", START_KEYBOARD)
@@ -540,12 +526,12 @@ def process_telegram_update(update):
         elif user_state['step'] == 'awaiting_file_continue':
             if text.lower() in ['yes', 'y']:
                 USER_STATE[chat_id] = {'step': 'awaiting_forward_file'}
-                send_message(chat_id, "➡️ FILE FORWARD: Send the **next Photo, Video, or Document** you want to forward now.")
+                send_message(chat_id, "➡️ FILE COPY: Send the **next Photo, Video, or Document** you want to copy now.")
             elif text.lower() in ['no', 'n', '/cancel']:
                 USER_STATE[chat_id] = {'step': 'main'}
                 send_message(chat_id, "Returning to main menu. Choose a new action:", START_KEYBOARD)
             else:
-                send_message(chat_id, "Please reply **Yes** or **No** to forward another file.")
+                send_message(chat_id, "Please reply **Yes** or **No** to copy another file.")
             return
 
 
@@ -560,7 +546,7 @@ def process_telegram_update(update):
 
         elif text.startswith('/forward_file'):
             USER_STATE[chat_id] = {'step': 'awaiting_forward_file'}
-            send_message(chat_id, "➡️ FILE FORWARD: Send the **Photo, Video, or Document** you want to save and forward to the Content Channel.")
+            send_message(chat_id, "➡️ FILE COPY: Send the **Photo, Video, or Document** you want to copy to the Content Channel.")
 
         elif text.startswith('/repost_10'):
             send_message(chat_id, "⏳ Fetching 10 random content items for reposting (from DiskWala or Forwarded files)...")
