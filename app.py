@@ -160,8 +160,8 @@ USER_STATE = {}
 # Updated Keyboard with new buttons
 MAIN_KEYBOARD = {
     'keyboard': [
-        [{'text': '📁 DiskWala'}, {'text': '🎬 Video Files'}],
-        [{'text': '🔄 Auto Repost (5)'}, {'text': '❌ Cancel'}]
+        [{'text': 'DiskWala Posts'}, {'text': 'Video Files'}],
+        [{'text': 'Auto Repost'}, {'text': 'Cancel'}]
     ],
     'resize_keyboard': True,
     'one_time_keyboard': False
@@ -169,8 +169,8 @@ MAIN_KEYBOARD = {
 
 DISKWALA_MODE_KEYBOARD = {
     'keyboard': [
-        [{'text': '📤 Single Post'}, {'text': '📨 Forward Multiple'}],
-        [{'text': '⬅️ Back to Main'}]
+        [{'text': 'Single Post'}, {'text': 'Forward Multiple'}],
+        [{'text': 'Back to Menu'}]
     ],
     'resize_keyboard': True,
     'one_time_keyboard': False
@@ -377,41 +377,46 @@ def process_telegram_update(update):
         
         # --- MAIN MENU HANDLERS ---
         
-        if text == '/start' or text == '⬅️ Back to Main':
+        if text == '/start' or text == 'Back to Menu':
             USER_STATE[chat_id] = {'step': 'main'}
             send_message(
                 chat_id, 
                 f"🚀 Welcome to {PRODUCT_NAME} Admin Bot!\n\n"
+                f"📁 DiskWala Posts - Post content with links to DiskWala channel\n"
+                f"🎬 Video Files - Forward files to Video Files channel\n"
+                f"🔄 Auto Repost - Repost 5 random DiskWala posts\n\n"
                 f"Choose an option:",
                 MAIN_KEYBOARD
             )
             return
         
         # --- DISKWALA BUTTON ---
-        if text == '📁 DiskWala':
+        if text == 'DiskWala Posts':
             USER_STATE[chat_id] = {'step': 'diskwala_mode'}
             send_message(
                 chat_id,
-                "📁 DiskWala Mode\n\n"
+                "📁 DiskWala Posts Mode\n\n"
+                "✏️ Single Post - Create one post with thumbnail and links\n"
+                "📨 Forward Multiple - Forward messages directly to channel\n\n"
                 "Choose posting method:",
                 DISKWALA_MODE_KEYBOARD
             )
             return
         
         # --- VIDEO FILES BUTTON ---
-        if text == '🎬 Video Files':
+        if text == 'Video Files':
             USER_STATE[chat_id] = {'step': 'video_files_waiting', 'file_count': 0}
             send_message(
                 chat_id,
                 "🎬 Video Files Mode\n\n"
-                "Send me the video files (photo/video/document) one by one.\n"
-                "I'll forward them to the channel with file numbers.\n\n"
-                "Type '❌ Cancel' when done."
+                "Send me the files (photo/video/document) one by one.\n"
+                "I'll forward them to the Video Files channel with file numbers.\n\n"
+                "Type 'Cancel' when done or to stop."
             )
             return
         
         # --- AUTO REPOST BUTTON ---
-        if text == '🔄 Auto Repost (5)':
+        if text == 'Auto Repost':
             send_message(chat_id, "⏳ Fetching 5 random DiskWala posts for reposting...")
             random_items = get_random_diskwala_content(limit=5)
             
@@ -434,7 +439,7 @@ def process_telegram_update(update):
             return
         
         # --- CANCEL BUTTON ---
-        if text == '❌ Cancel':
+        if text == 'Cancel':
             USER_STATE[chat_id] = {'step': 'main'}
             send_message(chat_id, "❌ Operation cancelled.", MAIN_KEYBOARD)
             return
@@ -442,7 +447,7 @@ def process_telegram_update(update):
         # --- DISKWALA MODE HANDLERS ---
         
         if user_state['step'] == 'diskwala_mode':
-            if text == '📤 Single Post':
+            if text == 'Single Post':
                 USER_STATE[chat_id] = {'step': 'diskwala_single_media', 'data': {}}
                 send_message(
                     chat_id,
@@ -451,15 +456,20 @@ def process_telegram_update(update):
                 )
                 return
             
-            elif text == '📨 Forward Multiple':
+            elif text == 'Forward Multiple':
                 USER_STATE[chat_id] = {'step': 'diskwala_forward_multiple'}
                 send_message(
                     chat_id,
                     "📨 Forward Multiple Messages\n\n"
                     "Forward multiple messages to me from any chat.\n"
                     "I'll forward them directly to the DiskWala channel without headers.\n\n"
-                    "Type '❌ Cancel' when done."
+                    "Type 'Cancel' when done."
                 )
+                return
+            
+            elif text == 'Back to Menu':
+                USER_STATE[chat_id] = {'step': 'main'}
+                send_message(chat_id, "Returning to main menu...", MAIN_KEYBOARD)
                 return
         
         # --- DISKWALA SINGLE POST FLOW ---
