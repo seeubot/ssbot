@@ -44,6 +44,8 @@ def init_mongodb():
             logger.error("MONGODB_URI environment variable is not set.")
             return False
         
+        # Use a non-global client connection to ensure thread safety if needed later, 
+        # but for now, we rely on the main thread setup
         client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=10000)
         client.admin.command('ping')
         
@@ -158,10 +160,10 @@ else:
 app = Flask(__name__)
 CORS(app)
 
-# Global state
+# Global state must be thread-safe or accessed carefully in async context
 USER_STATE = {}
 
-# Keyboard template - REMOVED /add, /edit, /delete, ADDED /forward_file
+# Keyboard template
 START_KEYBOARD = {
     'keyboard': [
         [{'text': '/post_diskwala'}, {'text': '/forward_file'}, {'text': '/repost_10'}, {'text': '/files'}],
@@ -186,12 +188,14 @@ def send_telegram_request(method, payload):
     for key, value in payload.items():
         if value is not None:
             if isinstance(value, str):
-                value = value.replace('\\u', '\\\\u')
+                # Simple escape for characters that might interfere with JSON or Telegram
+                value = value.replace('\\u', '\\\\u') 
             clean_payload[key] = value
     
     logger.info(f"Sending Telegram {method} to chat {clean_payload.get('chat_id')}")
     
     try:
+        # This is a BLOCKING network call (slow)
         response = requests.post(url, json=clean_payload, timeout=15)
         
         if response.status_code == 400:
@@ -253,9 +257,7 @@ def send_media_post(url, title, media_id, media_type):
     
     return success
 
-# --- CONTENT MANAGEMENT FUNCTIONS ---
-
-# Removed get_content_info_for_edit and update_content as they are no longer used by the bot.
+# --- CONTENT MANAGEMENT FUNCTIONS (Contains slow MongoDB I/O) ---
 
 def save_content(content_data):
     """Saves content data with new fields for different posting mechanisms."""
@@ -264,25 +266,25 @@ def save_content(content_data):
     try:
         # Clean tags and normalize links
         tags = [t.strip().lower() for t in content_data.get('tags', '').split(',') if t.strip()]
-        links = content_data.get('links', [])
         
         document = {
             "title": content_data.get('title'),
             "type": content_data.get('type'),
             "thumbnail_url": content_data.get('thumbnail_url'),
             # Fields for Reposting Logic
-            "post_type": content_data.get('post_type'), # 'diskwala_photo', 'diskwala_video', 'forwarded_file'
+            "post_type": content_data.get('post_type'), 
             "telegram_media_id": content_data.get('telegram_media_id'), 
             "telegram_message_id": content_data.get('telegram_message_id'),
             "telegram_chat_id": content_data.get('telegram_chat_id'),
             
             "diskwala_url": content_data.get('diskwala_url'),
             "tags": tags,
-            "links": links,
+            "links": content_data.get('links', []),
             "views": 0,
             "created_at": datetime.utcnow(),
             "last_viewed": datetime.utcnow()
         }
+        # BLOCKING MongoDB insert
         result = content_collection.insert_one(document)
         logger.info(f"Content saved with ID: {result.inserted_id}")
         
@@ -297,7 +299,7 @@ def get_random_content(limit=10):
     if content_collection is None:
         return []
     try:
-        # Only fetch items that have either media ID (DiskWala) or message ID (Forwarded)
+        # BLOCKING MongoDB aggregation
         pipeline = [
             {"$match": {"$or": [
                 {"telegram_media_id": {"$exists": True, "$ne": None}},
@@ -335,7 +337,7 @@ def repost_single_content(doc):
         # --- DiskWala/Media Repost (sendPhoto/sendVideo) ---
         diskwala_url = doc.get('diskwala_url')
         media_id = doc.get('telegram_media_id')
-        media_type = post_type.split('_')[1] # 'photo' or 'video'
+        media_type = post_type.split('_')[1] 
 
         if diskwala_url and media_id:
             message_text += f"\nWatch Now: {diskwala_url}"
@@ -355,14 +357,12 @@ def repost_single_content(doc):
         source_message_id = doc.get('telegram_message_id')
 
         if source_chat_id and source_message_id:
-            # Copy the message from the CONTENT_FORWARD_CHANNEL_ID to the GROUP_TELEGRAM_ID
             payload = {
                 'chat_id': GROUP_TELEGRAM_ID,
                 'from_chat_id': source_chat_id, 
                 'message_id': source_message_id,
-                'caption': message_text # Add the custom repost text
+                'caption': message_text
             }
-            # Note: Telegram's copyMessage handles media types automatically based on the source message.
             success = send_telegram_request('copyMessage', payload)
     
     if not success:
@@ -370,7 +370,295 @@ def repost_single_content(doc):
         
     return success
 
-# --- FLASK ROUTES (RETAINED) ---
+# --- ASYNC PROCESSING FUNCTION (New) ---
+
+def process_telegram_update(update):
+    """
+    Handles all the synchronous (slow) Telegram logic in a background thread.
+    """
+    try:
+        message = update.get('message')
+        if not message:
+            return
+            
+        chat_id = message['chat']['id']
+        text = message.get('text', '').strip()
+        user_id = message['from']['id']
+        
+        # Ensure thread-safe access to USER_STATE
+        user_state = USER_STATE.get(chat_id, {'step': 'main'})
+        
+        # Only respond to admin in private chats
+        if chat_id > 0 and user_id != ADMIN_TELEGRAM_ID:
+            send_message(chat_id, "❌ Access Denied. Only administrator can use this bot.")
+            return
+        
+        # --- DiskWala Multi-step conversation handlers ---
+
+        if user_state['step'] == 'awaiting_diskwala_photo':
+            media_id = None
+            media_type = None
+            
+            if 'video' in message:
+                media_id = message['video']['file_id']
+                media_type = 'video'
+            elif 'photo' in message:
+                media_id = message['photo'][-1]['file_id']
+                media_type = 'photo'
+
+            if media_id:
+                USER_STATE[chat_id]['data'] = {
+                    'telegram_media_id': media_id, 
+                    'media_type': media_type 
+                } 
+                USER_STATE[chat_id]['step'] = 'awaiting_diskwala_title'
+                send_message(chat_id, f"✅ {media_type.title()} saved. Now send the **Title** for the post.")
+            else:
+                send_message(chat_id, "❌ Please send an **Image or Video Clip** for the thumbnail.")
+            return
+
+        elif user_state['step'] == 'awaiting_diskwala_title':
+            USER_STATE[chat_id]['data']['title'] = text.strip()
+            USER_STATE[chat_id]['step'] = 'awaiting_diskwala_url'
+            send_message(chat_id, "✅ Title saved. Now send the **DiskWala URL**.")
+            return
+
+        elif user_state['step'] == 'awaiting_diskwala_url':
+            diskwala_url = text.strip()
+            
+            if not diskwala_url.startswith('http'):
+                send_message(chat_id, "❌ Please send a valid URL starting with http:// or https://")
+                return
+            
+            title = user_state['data']['title']
+            media_id = user_state['data']['telegram_media_id']
+            media_type = user_state['data']['media_type']
+            
+            send_message(chat_id, "⏳ Posting to group and saving to database...")
+
+            # 1. Post to group (SLOW I/O)
+            post_result = send_media_post(diskwala_url, title, media_id, media_type)
+            
+            final_message = ""
+
+            if post_result:
+                # 2. Try to save post details to database (SLOW I/O)
+                content_data = {
+                    "title": title,
+                    "type": "video",
+                    "thumbnail_url": f"telegram_file_id:{media_id}",
+                    "post_type": f"diskwala_{media_type}", 
+                    "telegram_media_id": media_id, 
+                    "diskwala_url": diskwala_url,
+                    "tags": title.lower().split(),
+                    "links": [{"url": diskwala_url, "episode_title": "Watch Now"}],
+                }
+                content_id = save_content(content_data)
+
+                if content_id:
+                    final_message = f"🎉 Success! Post '{title}' published and saved with ID: {content_id}."
+                else:
+                    final_message = f"✅ Post published to group. ❌ **Failed to save to database.** (Post Title: {title})"
+                
+                # Transition to the continuation state regardless of database save success
+                USER_STATE[chat_id]['step'] = 'awaiting_diskwala_continue'
+                send_message(chat_id, 
+                             final_message + "\n\nDo you want to post **another DiskWala link**? (Reply **Yes** or **No**)",
+                             )
+            else:
+                send_message(chat_id, "❌ Failed to post to Telegram group. Operation finished.", START_KEYBOARD)
+                USER_STATE[chat_id] = {'step': 'main'}
+
+            return
+        
+        elif user_state['step'] == 'awaiting_diskwala_continue':
+            if text.lower() in ['yes', 'y']:
+                USER_STATE[chat_id] = {'step': 'awaiting_diskwala_photo'}
+                send_message(chat_id, "➡️ POST DiskWala: Please send the **Image or Video Clip** for the next post now.")
+            elif text.lower() in ['no', 'n', '/cancel']:
+                USER_STATE[chat_id] = {'step': 'main'}
+                send_message(chat_id, "Returning to main menu. Choose a new action:", START_KEYBOARD)
+            else:
+                send_message(chat_id, "Please reply **Yes** or **No** to post another DiskWala link.")
+            return
+
+            
+        # --- File Forwarding Conversation Handler (UPDATED) ---
+
+        elif user_state['step'] == 'awaiting_forward_file':
+            is_media = 'photo' in message or 'video' in message or 'document' in message
+
+            if is_media:
+                original_message_id = message['message_id']
+                
+                send_message(chat_id, "⏳ Copying file to content channel (Forward header hidden)...")
+
+                # 1. Use copyMessage to forward without the "Forwarded from" header
+                copy_result = send_telegram_request('copyMessage', {
+                    'chat_id': CONTENT_FORWARD_CHANNEL_ID,
+                    'from_chat_id': chat_id, # Source is admin's private chat
+                    'message_id': original_message_id
+                })
+
+                if copy_result and copy_result.get('message_id'):
+                    channel_message_id = copy_result['message_id']
+                    
+                    # 2. Save forwarding details (SLOW I/O)
+                    title_text = message.get('caption') or f"Forwarded File {channel_message_id}"
+                    
+                    content_data = {
+                        "title": title_text, 
+                        "type": "file",
+                        "thumbnail_url": "N/A", 
+                        "post_type": "forwarded_file",
+                        "telegram_message_id": channel_message_id, 
+                        "telegram_chat_id": CONTENT_FORWARD_CHANNEL_ID, 
+                        "diskwala_url": f"t.me/c/{str(CONTENT_FORWARD_CHANNEL_ID).lstrip('-100')}/{channel_message_id}",
+                        "tags": ["forwarded", "file"],
+                        "links": [],
+                    }
+                    content_id = save_content(content_data)
+
+                    final_message = ""
+                    if content_id:
+                        final_message = f"🎉 Success! File copied to channel (ID: {channel_message_id}) and saved with ID: {content_id}."
+                    else:
+                        final_message = f"✅ File copied. ❌ **Failed to save to database.**"
+                    
+                    # Transition to the continuation state
+                    USER_STATE[chat_id]['step'] = 'awaiting_file_continue'
+                    send_message(chat_id, 
+                                final_message + "\n\nDo you want to **forward another file**? (Reply **Yes** or **No**)", 
+                                )
+                else:
+                    send_message(chat_id, "❌ Failed to copy file to content channel. Check bot permissions.", START_KEYBOARD)
+                    USER_STATE[chat_id] = {'step': 'main'}
+            else:
+                send_message(chat_id, "❌ Please send a valid media file (Photo, Video, or Document).")
+            return
+        
+        elif user_state['step'] == 'awaiting_file_continue':
+            if text.lower() in ['yes', 'y']:
+                USER_STATE[chat_id] = {'step': 'awaiting_forward_file'}
+                send_message(chat_id, "➡️ FILE FORWARD: Send the **next Photo, Video, or Document** you want to forward now.")
+            elif text.lower() in ['no', 'n', '/cancel']:
+                USER_STATE[chat_id] = {'step': 'main'}
+                send_message(chat_id, "Returning to main menu. Choose a new action:", START_KEYBOARD)
+            else:
+                send_message(chat_id, "Please reply **Yes** or **No** to forward another file.")
+            return
+
+
+        # --- Handle Commands ---
+        if text.startswith('/start'):
+            USER_STATE[chat_id] = {'step': 'main'}
+            send_message(chat_id, f"🚀 Welcome to {PRODUCT_NAME} Admin Bot!\n\nUse /post_diskwala for web content, /forward_file for channel files, or /repost_10 to quickly refresh content.", START_KEYBOARD)
+            
+        elif text.startswith('/post_diskwala'):
+            USER_STATE[chat_id] = {'step': 'awaiting_diskwala_photo'}
+            send_message(chat_id, "➡️ POST DiskWala: Please send the **Image or Video Clip** for the new post now.")
+
+        elif text.startswith('/forward_file'):
+            USER_STATE[chat_id] = {'step': 'awaiting_forward_file'}
+            send_message(chat_id, "➡️ FILE FORWARD: Send the **Photo, Video, or Document** you want to save and forward to the Content Channel.")
+
+        elif text.startswith('/repost_10'):
+            send_message(chat_id, "⏳ Fetching 10 random content items for reposting (from DiskWala or Forwarded files)...")
+            random_items = get_random_content(limit=10) # SLOW I/O
+            
+            if not random_items:
+                send_message(chat_id, "❌ Could not find any content eligible for repost.", START_KEYBOARD)
+            else:
+                reposted_count = 0
+                for item in random_items:
+                    if repost_single_content(item): # SLOW I/O
+                        reposted_count += 1
+                        time.sleep(1) 
+                
+                send_message(chat_id, f"✅ Repost complete. {reposted_count}/{len(random_items)} items successfully reposted.", START_KEYBOARD)
+            
+            USER_STATE[chat_id] = {'step': 'main'}
+
+        elif text.startswith('/files'):
+            if content_collection is None:
+                send_message(chat_id, "❌ Database is currently unavailable.")
+                return
+                
+            try:
+                # BLOCKING MongoDB find
+                content_cursor = content_collection.find({}, {'title': 1, 'created_at': 1, 'post_type': 1}).sort("created_at", -1).limit(10)
+                
+                content_list_text = []
+                for i, doc in enumerate(content_cursor):
+                    title = doc.get('title', 'No Title')
+                    _id = str(doc['_id'])
+                    post_type = doc.get('post_type', 'N/A')
+                    content_list_text.append(f"{i+1}. [{post_type.upper()}] {title} ({_id})")
+                    
+                if content_list_text:
+                    response_text = "📚 Latest 10 Content Items (Title & ID):\n\n" + "\n".join(content_list_text)
+                else:
+                    response_text = "No content has been uploaded yet."
+                
+                send_message(chat_id, response_text, START_KEYBOARD)
+            except Exception as e:
+                logger.error(f"Error fetching files list: {e}")
+                send_message(chat_id, "❌ An error occurred while fetching the file list.")
+            
+        elif text.startswith('/broadcast'):
+            USER_STATE[chat_id] = {'step': 'broadcast_message'}
+            send_message(chat_id, "➡️ BROADCAST: Send the message you want to broadcast to the group.")
+            
+        elif text.startswith('/cancel'):
+            USER_STATE[chat_id] = {'step': 'main'}
+            send_message(chat_id, "❌ Operation cancelled. Choose a new action:", START_KEYBOARD)
+            
+        # Broadcast Handler
+        elif user_state['step'] == 'broadcast_message':
+            broadcast_text = text
+            send_message(GROUP_TELEGRAM_ID, f"📢 ADMIN ANNOUNCEMENT:\n\n{broadcast_text}") # SLOW I/O
+            send_message(chat_id, "✅ Message broadcasted to the group successfully.", START_KEYBOARD)
+            USER_STATE[chat_id] = {'step': 'main'}
+
+        else:
+            send_message(chat_id, "🤔 I don't recognize that command or state. Use /start to see available commands.")
+            
+    except Exception as e:
+        logger.error(f"Async processing error: {e}")
+        # Only try to notify admin if the error is severe enough
+        try:
+            send_message(ADMIN_TELEGRAM_ID, f"🚨 Critical Processing Error: {e}")
+        except Exception:
+            pass
+        
+# --- FLASK ROUTES (The Webhook now only handles immediate response) ---
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """
+    Receives the Telegram update and immediately spins off a thread to process it.
+    Returns 200 OK instantly to prevent Telegram timeouts.
+    """
+    if not BOT_TOKEN:
+        return jsonify({"status": "telegram not configured"}), 200
+        
+    try:
+        update = request.get_json(silent=True)
+        if not update:
+            return jsonify({"status": "no data"}), 200
+        
+        # Start a new thread for the actual processing (which includes all I/O)
+        threading.Thread(target=process_telegram_update, args=(update,)).start()
+        
+        # Return success immediately
+        return jsonify({"status": "received and processing"}), 200
+        
+    except Exception as e:
+        logger.error(f"Webhook error during parsing/threading setup: {e}")
+        return jsonify({"status": "error"}), 500
+
+
+# --- OTHER FLASK ROUTES (RETAINED) ---
 
 @app.route('/', methods=['GET'])
 def index():
@@ -520,244 +808,6 @@ def get_similar_content(tags):
         logger.error(f"API Similar Fetch Error: {e}")
         return jsonify({"success": False, "error": "Failed to retrieve similar content."}), 500
 
-# --- ADMIN ROUTES (REMOVED CRUD ENDPOINTS) ---
-# Only health check and webhook remain for management
-
-# --- COMPLETE TELEGRAM WEBHOOK HANDLER (Updated) ---
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Complete webhook handler with updated DiskWala and new file forwarding logic."""
-    if not BOT_TOKEN:
-        return jsonify({"status": "telegram not configured"}), 200
-        
-    try:
-        update = request.get_json(silent=True)
-        if not update:
-            return jsonify({"status": "no data"}), 200
-        
-        message = update.get('message')
-        if not message:
-            return jsonify({"status": "not message"}), 200
-            
-        chat_id = message['chat']['id']
-        text = message.get('text', '').strip()
-        user_id = message['from']['id']
-        user_state = USER_STATE.get(chat_id, {'step': 'main'})
-        
-        # Only respond to admin in private chats
-        if chat_id > 0 and user_id != ADMIN_TELEGRAM_ID:
-            send_message(chat_id, "❌ Access Denied. Only administrator can use this bot.")
-            return jsonify({"status": "unauthorized"}), 200
-        
-        # --- DiskWala Multi-step conversation handlers (C) ---
-
-        if user_state['step'] == 'awaiting_diskwala_photo':
-            media_id = None
-            media_type = None
-            
-            # Check for video first
-            if 'video' in message:
-                media_id = message['video']['file_id']
-                media_type = 'video'
-            # Then check for photo (use largest size)
-            elif 'photo' in message:
-                media_id = message['photo'][-1]['file_id']
-                media_type = 'photo'
-
-            if media_id:
-                USER_STATE[chat_id]['data'] = {
-                    'telegram_media_id': media_id, 
-                    'media_type': media_type # Temporary state variable
-                } 
-                USER_STATE[chat_id]['step'] = 'awaiting_diskwala_title'
-                send_message(chat_id, f"✅ {media_type.title()} saved. Now send the **Title** for the post.")
-            else:
-                send_message(chat_id, "❌ Please send an **Image or Video Clip** for the thumbnail.")
-            return jsonify({"status": "ok"}), 200
-
-        elif user_state['step'] == 'awaiting_diskwala_title':
-            USER_STATE[chat_id]['data']['title'] = text.strip()
-            USER_STATE[chat_id]['step'] = 'awaiting_diskwala_url'
-            send_message(chat_id, "✅ Title saved. Now send the **DiskWala URL**.")
-            return jsonify({"status": "ok"}), 200
-
-        elif user_state['step'] == 'awaiting_diskwala_url':
-            diskwala_url = text.strip()
-            
-            if not diskwala_url.startswith('http'):
-                send_message(chat_id, "❌ Please send a valid URL starting with http:// or https://")
-                return jsonify({"status": "ok"}), 200
-            
-            title = user_state['data']['title']
-            media_id = user_state['data']['telegram_media_id']
-            media_type = user_state['data']['media_type']
-            
-            send_message(chat_id, "⏳ Posting to group and saving to database...")
-
-            # 1. Post to group
-            post_result = send_media_post(diskwala_url, title, media_id, media_type)
-            
-            if post_result:
-                # 2. Save post details to database
-                content_data = {
-                    "title": title,
-                    "type": "video", # Default to video type for DiskWala posts
-                    "thumbnail_url": f"telegram_file_id:{media_id}",
-                    "post_type": f"diskwala_{media_type}", 
-                    "telegram_media_id": media_id, 
-                    "diskwala_url": diskwala_url,
-                    "tags": title.lower().split(),
-                    "links": [{"url": diskwala_url, "episode_title": "Watch Now"}],
-                }
-                content_id = save_content(content_data)
-
-                if content_id:
-                    send_message(chat_id, 
-                                 f"🎉 Success! Post '{title}' published and saved with ID: {content_id}.", 
-                                 START_KEYBOARD)
-                else:
-                    send_message(chat_id, 
-                                 f"✅ Post published to group. ❌ Failed to save to database.", 
-                                 START_KEYBOARD)
-            else:
-                send_message(chat_id, "❌ Failed to post to Telegram group.", START_KEYBOARD)
-
-            USER_STATE[chat_id] = {'step': 'main'}
-            return jsonify({"status": "diskwala posted"}), 200
-            
-        # --- File Forwarding Conversation Handler (B) ---
-
-        elif user_state['step'] == 'awaiting_forward_file':
-            is_media = 'photo' in message or 'video' in message or 'document' in message
-
-            if is_media:
-                original_message_id = message['message_id']
-                
-                send_message(chat_id, "⏳ Forwarding file to content channel...")
-
-                # 1. Forward the message to CONTENT_FORWARD_CHANNEL_ID
-                forward_result = send_telegram_request('forwardMessage', {
-                    'chat_id': CONTENT_FORWARD_CHANNEL_ID,
-                    'from_chat_id': chat_id, # Source is admin's private chat
-                    'message_id': original_message_id
-                })
-
-                if forward_result and forward_result.get('message_id'):
-                    channel_message_id = forward_result['message_id']
-                    
-                    # 2. Save forwarding details
-                    content_data = {
-                        "title": f"Forwarded File {channel_message_id}", 
-                        "type": "file",
-                        "thumbnail_url": "N/A", 
-                        "post_type": "forwarded_file",
-                        "telegram_message_id": channel_message_id, 
-                        "telegram_chat_id": CONTENT_FORWARD_CHANNEL_ID, 
-                        "diskwala_url": f"t.me/c/{str(CONTENT_FORWARD_CHANNEL_ID).lstrip('-100')}/{channel_message_id}",
-                        "tags": ["forwarded", "file"],
-                        "links": [],
-                    }
-                    content_id = save_content(content_data)
-
-                    if content_id:
-                        send_message(chat_id, 
-                                    f"🎉 Success! File forwarded to channel (ID: {channel_message_id}) and saved with ID: {content_id}.", 
-                                    START_KEYBOARD)
-                    else:
-                        send_message(chat_id, 
-                                    f"✅ File forwarded. ❌ Failed to save to database.", 
-                                    START_KEYBOARD)
-                else:
-                    send_message(chat_id, "❌ Failed to forward file to content channel. Check bot permissions.", START_KEYBOARD)
-
-                USER_STATE[chat_id] = {'step': 'main'}
-            else:
-                send_message(chat_id, "❌ Please send a valid media file (Photo, Video, or Document).")
-            return jsonify({"status": "ok"}), 200
-
-
-        # --- Handle Commands ---
-        if text.startswith('/start'):
-            USER_STATE[chat_id] = {'step': 'main'}
-            send_message(chat_id, f"🚀 Welcome to {PRODUCT_NAME} Admin Bot!\n\nUse /post_diskwala for web content, /forward_file for channel files, or /repost_10 to quickly refresh content.", START_KEYBOARD)
-            
-        elif text.startswith('/post_diskwala'):
-            USER_STATE[chat_id] = {'step': 'awaiting_diskwala_photo'}
-            send_message(chat_id, "➡️ POST DiskWala: Please send the **Image or Video Clip** for the new post now.")
-
-        elif text.startswith('/forward_file'):
-            USER_STATE[chat_id] = {'step': 'awaiting_forward_file'}
-            send_message(chat_id, "➡️ FILE FORWARD: Send the **Photo, Video, or Document** you want to save and forward to the Content Channel.")
-
-        elif text.startswith('/repost_10'):
-            send_message(chat_id, "⏳ Fetching 10 random content items for reposting (from DiskWala or Forwarded files)...")
-            random_items = get_random_content(limit=10)
-            
-            if not random_items:
-                send_message(chat_id, "❌ Could not find any content eligible for repost.", START_KEYBOARD)
-            else:
-                reposted_count = 0
-                for item in random_items:
-                    if repost_single_content(item):
-                        reposted_count += 1
-                        time.sleep(1) # Delay to avoid flood limits
-                
-                send_message(chat_id, f"✅ Repost complete. {reposted_count}/{len(random_items)} items successfully reposted.", START_KEYBOARD)
-            
-            USER_STATE[chat_id] = {'step': 'main'}
-
-        elif text.startswith('/files'):
-            if content_collection is None:
-                send_message(chat_id, "❌ Database is currently unavailable.")
-                return jsonify({"status": "ok"}), 200
-                
-            try:
-                # Fetch top 10 most recent titles and IDs
-                content_cursor = content_collection.find({}, {'title': 1, 'created_at': 1}).sort("created_at", -1).limit(10)
-                
-                content_list_text = []
-                for i, doc in enumerate(content_cursor):
-                    title = doc.get('title', 'No Title')
-                    _id = str(doc['_id'])
-                    post_type = doc.get('post_type', 'N/A')
-                    content_list_text.append(f"{i+1}. [{post_type.upper()}] {title} ({_id})")
-                    
-                if content_list_text:
-                    response_text = "📚 Latest 10 Content Items (Title & ID):\n\n" + "\n".join(content_list_text)
-                else:
-                    response_text = "No content has been uploaded yet."
-                
-                send_message(chat_id, response_text, START_KEYBOARD)
-            except Exception as e:
-                logger.error(f"Error fetching files list: {e}")
-                send_message(chat_id, "❌ An error occurred while fetching the file list.")
-            
-        elif text.startswith('/broadcast'):
-            USER_STATE[chat_id] = {'step': 'broadcast_message'}
-            send_message(chat_id, "➡️ BROADCAST: Send the message you want to broadcast to the group.")
-            
-        elif text.startswith('/cancel'):
-            USER_STATE[chat_id] = {'step': 'main'}
-            send_message(chat_id, "❌ Operation cancelled. Choose a new action:", START_KEYBOARD)
-            
-        # Broadcast Handler
-        elif user_state['step'] == 'broadcast_message':
-            broadcast_text = text
-            send_message(GROUP_TELEGRAM_ID, f"📢 ADMIN ANNOUNCEMENT:\n\n{broadcast_text}")
-            send_message(chat_id, "✅ Message broadcasted to the group successfully.", START_KEYBOARD)
-            USER_STATE[chat_id] = {'step': 'main'}
-
-        else:
-            # If no command matched, show help
-            send_message(chat_id, "🤔 I don't recognize that command or state. Use /start to see available commands.")
-            
-        return jsonify({"status": "ok"}), 200
-        
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        send_message(ADMIN_TELEGRAM_ID, f"🚨 Critical Webhook Error: {e}")
-        return jsonify({"status": "error"}), 500
 
 # --- BACKGROUND TASKS (RETAINED) ---
 
@@ -786,6 +836,7 @@ def flush_view_cache():
                             )
                 
                 if bulk_ops:
+                    # BLOCKING MongoDB bulk write
                     result = content_collection.bulk_write(bulk_ops, ordered=False)
                     logger.info(f"Flushed {result.modified_count} view count updates")
                     view_count_cache.clear()
@@ -808,6 +859,7 @@ def set_webhook():
         'drop_pending_updates': True
     }
     
+    # BLOCKING network request
     return send_telegram_request('setWebhook', payload)
 
 @app.before_request
