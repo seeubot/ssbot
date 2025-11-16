@@ -231,15 +231,20 @@ def send_message(chat_id, text, reply_markup=None):
     
     return send_telegram_request('sendMessage', payload)
 
-# Renamed and updated to handle photo or video media ID
-def send_media_post(url, title, media_id, media_type):
-    """Send DiskWala link to group using a Telegram File ID (photo or video)."""
+def send_media_post(title, media_id, media_type, links):
+    """Send DiskWala links to group using a Telegram File ID (photo or video)."""
     if not TELEGRAM_API or GROUP_TELEGRAM_ID is None:
         return False
 
+    link_text = ""
+    # Structure multiple links clearly for the caption
+    for i, link in enumerate(links):
+        link_title = link.get('episode_title', f'Link {i+1}')
+        link_text += f"🔗 {link_title}: {link.get('url')}\n"
+
     message_text = (
         f"🔥 NEW RELEASE: {title} 🔥\n\n"
-        f"Watch Now: {url}\n\n"
+        f"{link_text}\n"
         f"Powered by {PRODUCT_NAME}"
     )
     
@@ -258,8 +263,7 @@ def send_media_post(url, title, media_id, media_type):
     return success
 
 # --- CONTENT MANAGEMENT FUNCTIONS (Contains slow MongoDB I/O) ---
-# NOTE: save_content is preserved for DiskWala flow and reposting logic, 
-# but removed from the file forwarding flow as per user request.
+# NOTE: save_content is preserved for DiskWala flow and reposting logic.
 
 def save_content(content_data):
     """Saves content data with new fields for different posting mechanisms."""
@@ -279,9 +283,9 @@ def save_content(content_data):
             "telegram_message_id": content_data.get('telegram_message_id'),
             "telegram_chat_id": content_data.get('telegram_chat_id'),
             
-            "diskwala_url": content_data.get('diskwala_url'),
+            "diskwala_url": content_data.get('diskwala_url'), # First link serves as the main URL
             "tags": tags,
-            "links": content_data.get('links', []),
+            "links": content_data.get('links', []), # Full list of links
             "views": 0,
             "created_at": datetime.utcnow(),
             "last_viewed": datetime.utcnow()
@@ -337,12 +341,23 @@ def repost_single_content(doc):
 
     if post_type and post_type.startswith('diskwala_'):
         # --- DiskWala/Media Repost (sendPhoto/sendVideo) ---
-        diskwala_url = doc.get('diskwala_url')
         media_id = doc.get('telegram_media_id')
         media_type = post_type.split('_')[1] 
+        links = doc.get('links', [])
 
-        if diskwala_url and media_id:
-            message_text += f"\nWatch Now: {diskwala_url}"
+        if links and media_id:
+            # Reconstruct link text for repost caption
+            link_text = ""
+            for i, link in enumerate(links):
+                link_title = link.get('episode_title', f'Link {i+1}')
+                link_text += f"🔗 {link_title}: {link.get('url')}\n"
+            
+            message_text = (
+                f"🔄 REPOST: {title}\n\n"
+                f"{link_text}\n"
+                f"Powered by {PRODUCT_NAME}"
+            )
+            
             method = 'sendPhoto' if media_type == 'photo' else 'sendVideo'
             media_key = 'photo' if media_type == 'photo' else 'video'
             
@@ -359,11 +374,12 @@ def repost_single_content(doc):
         source_message_id = doc.get('telegram_message_id')
 
         if source_chat_id and source_message_id:
+            # We don't use the title caption for pure file reposts, just copy the media
             payload = {
                 'chat_id': GROUP_TELEGRAM_ID,
                 'from_chat_id': source_chat_id, 
                 'message_id': source_message_id,
-                'caption': message_text
+                # Note: No caption is set here to ensure the file is clean on repost too
             }
             success = send_telegram_request('copyMessage', payload)
     
@@ -372,7 +388,7 @@ def repost_single_content(doc):
         
     return success
 
-# --- ASYNC PROCESSING FUNCTION (New) ---
+# --- ASYNC PROCESSING FUNCTION ---
 
 def process_telegram_update(update):
     """
@@ -395,9 +411,9 @@ def process_telegram_update(update):
             send_message(chat_id, "❌ Access Denied. Only administrator can use this bot.")
             return
         
-        # --- DiskWala Multi-step conversation handlers ---
+        # --- DiskWala Multi-step conversation handlers (UPDATED for loop and multiple URLs) ---
 
-        if user_state['step'] == 'awaiting_diskwala_photo':
+        if user_state['step'] == 'awaiting_diskwala_media': # Step 1: Get Media
             media_id = None
             media_type = None
             
@@ -414,46 +430,55 @@ def process_telegram_update(update):
                     'media_type': media_type 
                 } 
                 USER_STATE[chat_id]['step'] = 'awaiting_diskwala_title'
-                send_message(chat_id, f"✅ {media_type.title()} saved. Now send the **Title** for the post.")
+                send_message(chat_id, f"✅ {media_type.title()} saved. (Step 2/3): Now send the **Title** for the post.")
             else:
-                send_message(chat_id, "❌ Please send an **Image or Video Clip** for the thumbnail.")
+                send_message(chat_id, "❌ Please send an **Image or Video Clip** for the thumbnail (or /cancel).")
             return
 
-        elif user_state['step'] == 'awaiting_diskwala_title':
+        elif user_state['step'] == 'awaiting_diskwala_title': # Step 2: Get Title
             USER_STATE[chat_id]['data']['title'] = text.strip()
-            USER_STATE[chat_id]['step'] = 'awaiting_diskwala_url'
-            send_message(chat_id, "✅ Title saved. Now send the **DiskWala URL**.")
+            USER_STATE[chat_id]['step'] = 'awaiting_diskwala_urls'
+            send_message(chat_id, "✅ Title saved. (Step 3/3): Now send **all DiskWala URLs**, placing each link on a new line.")
             return
 
-        elif user_state['step'] == 'awaiting_diskwala_url':
-            diskwala_url = text.strip()
+        elif user_state['step'] == 'awaiting_diskwala_urls': # Step 3: Get URLs & Finalize
+            raw_urls = text.strip().split('\n')
             
-            if not diskwala_url.startswith('http'):
-                send_message(chat_id, "❌ Please send a valid URL starting with http:// or https://")
+            valid_urls = [url.strip() for url in raw_urls if url.strip().startswith('http')]
+            
+            if not valid_urls:
+                send_message(chat_id, "❌ Please send at least one valid URL, each on a new line, starting with http:// or https://")
                 return
             
+            # --- Prepare Data ---
             title = user_state['data']['title']
             media_id = user_state['data']['telegram_media_id']
             media_type = user_state['data']['media_type']
             
+            # Format links for the Telegram post and database
+            diskwala_links = []
+            for i, url in enumerate(valid_urls):
+                link_title = f"Watch Now" if i == 0 else f"Link {i+1}"
+                diskwala_links.append({"url": url, "episode_title": link_title})
+
             send_message(chat_id, "⏳ Posting to group and saving to database...")
 
-            # 1. Post to group (SLOW I/O)
-            post_result = send_media_post(diskwala_url, title, media_id, media_type)
+            # 1. Post to group
+            post_result = send_media_post(title, media_id, media_type, diskwala_links) 
             
             final_message = ""
 
             if post_result:
-                # 2. Try to save post details to database (SLOW I/O)
+                # 2. Save post details to database (SLOW I/O)
                 content_data = {
                     "title": title,
                     "type": "video",
                     "thumbnail_url": f"telegram_file_id:{media_id}",
                     "post_type": f"diskwala_{media_type}", 
                     "telegram_media_id": media_id, 
-                    "diskwala_url": diskwala_url,
+                    "diskwala_url": valid_urls[0], # First link is the main one
                     "tags": title.lower().split(),
-                    "links": [{"url": diskwala_url, "episode_title": "Watch Now"}],
+                    "links": diskwala_links, # Store the full list
                 }
                 content_id = save_content(content_data)
 
@@ -462,30 +487,18 @@ def process_telegram_update(update):
                 else:
                     final_message = f"✅ Post published to group. ❌ **Failed to save to database.** (Post Title: {title})"
                 
-                # Transition to the continuation state regardless of database save success
-                USER_STATE[chat_id]['step'] = 'awaiting_diskwala_continue'
+                # LOOP BACK: Clear previous data and transition back to start of DiskWala flow
+                USER_STATE[chat_id] = {'step': 'awaiting_diskwala_media', 'data': {}}
                 send_message(chat_id, 
-                             final_message + "\n\nDo you want to post **another DiskWala link**? (Reply **Yes** or **No**)",
+                             final_message + "\n\n➡️ **NEXT DiskWala:** Send the **Image or Video Clip** for the next post now (or /cancel).",
                              )
             else:
                 send_message(chat_id, "❌ Failed to post to Telegram group. Operation finished.", START_KEYBOARD)
                 USER_STATE[chat_id] = {'step': 'main'}
 
             return
-        
-        elif user_state['step'] == 'awaiting_diskwala_continue':
-            if text.lower() in ['yes', 'y']:
-                USER_STATE[chat_id] = {'step': 'awaiting_diskwala_photo'}
-                send_message(chat_id, "➡️ POST DiskWala: Please send the **Image or Video Clip** for the next post now.")
-            elif text.lower() in ['no', 'n', '/cancel']:
-                USER_STATE[chat_id] = {'step': 'main'}
-                send_message(chat_id, "Returning to main menu. Choose a new action:", START_KEYBOARD)
-            else:
-                send_message(chat_id, "Please reply **Yes** or **No** to post another DiskWala link.")
-            return
-
             
-        # --- File Forwarding Conversation Handler (UPDATED to skip DB save and clear caption) ---
+        # --- File Forwarding Conversation Handler (UPDATED for loop and clean copy) ---
 
         elif user_state['step'] == 'awaiting_forward_file':
             is_media = 'photo' in message or 'video' in message or 'document' in message
@@ -493,7 +506,7 @@ def process_telegram_update(update):
             if is_media:
                 original_message_id = message['message_id']
                 
-                send_message(chat_id, "⏳ Copying file to content channel (Forward header hidden and **Caption Removed**)...")
+                send_message(chat_id, "⏳ Copying file to content channel (Forward header hidden and Caption Removed)...")
 
                 # 1. Use copyMessage to copy the file. 
                 # Setting 'caption': "" ensures the original text/caption is not included.
@@ -507,14 +520,12 @@ def process_telegram_update(update):
                 if copy_result and copy_result.get('message_id'):
                     channel_message_id = copy_result['message_id']
                     
-                    # *** DATABASE SAVING IS SKIPPED AS REQUESTED ***
-                    
                     final_message = f"🎉 Success! File copied to content channel (Message ID: {channel_message_id})."
                     
-                    # Transition to the continuation state
-                    USER_STATE[chat_id]['step'] = 'awaiting_file_continue'
+                    # LOOP BACK: Keep state at the same step
+                    USER_STATE[chat_id]['step'] = 'awaiting_forward_file'
                     send_message(chat_id, 
-                                final_message + "\n\nDo you want to **copy another file**? (Reply **Yes** or **No**)", 
+                                final_message + "\n\n➡️ **NEXT FILE:** Send the **next Photo, Video, or Document** you want to copy now (or /cancel).", 
                                 )
                 else:
                     send_message(chat_id, "❌ Failed to copy file to content channel. Check bot permissions.", START_KEYBOARD)
@@ -522,18 +533,6 @@ def process_telegram_update(update):
             else:
                 send_message(chat_id, "❌ Please send a valid media file (Photo, Video, or Document).")
             return
-        
-        elif user_state['step'] == 'awaiting_file_continue':
-            if text.lower() in ['yes', 'y']:
-                USER_STATE[chat_id] = {'step': 'awaiting_forward_file'}
-                send_message(chat_id, "➡️ FILE COPY: Send the **next Photo, Video, or Document** you want to copy now.")
-            elif text.lower() in ['no', 'n', '/cancel']:
-                USER_STATE[chat_id] = {'step': 'main'}
-                send_message(chat_id, "Returning to main menu. Choose a new action:", START_KEYBOARD)
-            else:
-                send_message(chat_id, "Please reply **Yes** or **No** to copy another file.")
-            return
-
 
         # --- Handle Commands ---
         if text.startswith('/start'):
@@ -541,12 +540,12 @@ def process_telegram_update(update):
             send_message(chat_id, f"🚀 Welcome to {PRODUCT_NAME} Admin Bot!\n\nUse /post_diskwala for web content, /forward_file for channel files, or /repost_10 to quickly refresh content.", START_KEYBOARD)
             
         elif text.startswith('/post_diskwala'):
-            USER_STATE[chat_id] = {'step': 'awaiting_diskwala_photo'}
-            send_message(chat_id, "➡️ POST DiskWala: Please send the **Image or Video Clip** for the new post now.")
+            USER_STATE[chat_id] = {'step': 'awaiting_diskwala_media'}
+            send_message(chat_id, "➡️ POST DiskWala (Step 1/3): Please send the **Image or Video Clip** for the new post now (or /cancel).")
 
         elif text.startswith('/forward_file'):
             USER_STATE[chat_id] = {'step': 'awaiting_forward_file'}
-            send_message(chat_id, "➡️ FILE COPY: Send the **Photo, Video, or Document** you want to copy to the Content Channel.")
+            send_message(chat_id, "➡️ FILE COPY: Send the **Photo, Video, or Document** you want to copy to the Content Channel (or /cancel to stop).")
 
         elif text.startswith('/repost_10'):
             send_message(chat_id, "⏳ Fetching 10 random content items for reposting (from DiskWala or Forwarded files)...")
