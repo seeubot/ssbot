@@ -177,6 +177,16 @@ DISKWALA_MODE_KEYBOARD = {
     'one_time_keyboard': False
 }
 
+CHECK_FILES_KEYBOARD = {
+    'keyboard': [
+        [{'text': 'Save This File'}],
+        [{'text': 'Next File'}, {'text': 'Skip All'}],
+        [{'text': 'Back to Menu'}]
+    ],
+    'resize_keyboard': True,
+    'one_time_keyboard': False
+}
+
 # --- TELEGRAM FUNCTIONS ---
 
 def send_telegram_request(method, payload):
@@ -318,7 +328,99 @@ def get_random_diskwala_content(limit=5):
         logger.error(f"Error fetching random content: {e}")
         return []
 
-def repost_diskwala_content(doc):
+def get_unsaved_diskwala_messages(limit=10):
+    """Fetches recent messages from DiskWala channel that aren't saved in database"""
+    if not TELEGRAM_API or GROUP_TELEGRAM_ID is None or content_collection is None:
+        return []
+    
+    try:
+        # Get recent messages from DiskWala channel
+        payload = {
+            'chat_id': GROUP_TELEGRAM_ID,
+            'limit': 100  # Check last 100 messages
+        }
+        
+        # We'll use getUpdates or check recent messages
+        # For now, we'll return empty as Telegram doesn't allow fetching channel history easily
+        # Alternative: Store all message IDs when posting and compare
+        return []
+        
+    except Exception as e:
+        logger.error(f"Error fetching unsaved messages: {e}")
+        return []
+
+def check_message_in_database(message_id):
+    """Check if a message is already saved in database"""
+    if content_collection is None:
+        return False
+    
+    try:
+        doc = content_collection.find_one({
+            "telegram_message_id": message_id,
+            "telegram_chat_id": GROUP_TELEGRAM_ID
+        })
+        return doc is not None
+    except Exception as e:
+        logger.error(f"Error checking message in database: {e}")
+        return False
+
+def save_forwarded_message_to_db(message):
+    """Save a forwarded DiskWala message to database"""
+    if content_collection is None:
+        return False
+    
+    try:
+        media_id = None
+        media_type = None
+        
+        if 'video' in message:
+            media_id = message['video']['file_id']
+            media_type = 'video'
+        elif 'photo' in message:
+            media_id = message['photo'][-1]['file_id']
+            media_type = 'photo'
+        
+        if not media_id:
+            return False
+        
+        # Extract info from caption
+        caption = message.get('caption', '')
+        title = "Untitled Content"
+        links = []
+        
+        if caption:
+            import re
+            # Extract URLs
+            urls = re.findall(r'https?://[^\s]+', caption)
+            if urls:
+                for i, url in enumerate(urls):
+                    links.append({"url": url, "episode_title": f"Link {i+1}"})
+            
+            # Extract title (first line)
+            first_line = caption.split('\n')[0].strip()
+            # Remove emojis and clean title
+            title_clean = re.sub(r'[🔥🎬📁🔗💯⚡🎉✨]', '', first_line).strip()
+            if title_clean and len(title_clean) > 3:
+                title = title_clean[:100]
+        
+        content_data = {
+            "title": title,
+            "type": "video",
+            "thumbnail_url": f"telegram_file_id:{media_id}",
+            "post_type": f"diskwala_{media_type}",
+            "telegram_media_id": media_id,
+            "telegram_message_id": message.get('message_id'),
+            "telegram_chat_id": message['chat']['id'],
+            "diskwala_url": links[0]['url'] if links else "",
+            "tags": title.lower().split(),
+            "links": links,
+        }
+        
+        return save_content(content_data)
+        
+    except Exception as e:
+        logger.error(f"Error saving forwarded message: {e}")
+        return False
     """Reposts a single DiskWala content item"""
     if GROUP_TELEGRAM_ID is None:
         return False
@@ -375,6 +477,9 @@ def process_telegram_update(update):
         text = message.get('text', '').strip()
         user_id = message['from']['id']
         
+        # Log the incoming message for debugging
+        logger.info(f"Processing message from user {user_id}, chat {chat_id}, text: '{text}'")
+        
         # ADMIN ONLY ACCESS
         if user_id != ADMIN_TELEGRAM_ID:
             send_message(chat_id, "❌ Access Denied. Only administrator can use this bot.")
@@ -391,7 +496,8 @@ def process_telegram_update(update):
                 f"🚀 Welcome to {PRODUCT_NAME} Admin Bot!\n\n"
                 f"📁 DiskWala Posts - Post content with links to DiskWala channel\n"
                 f"🎬 Video Files - Forward files to Video Files channel\n"
-                f"🔄 Auto Repost - Repost 5 random DiskWala posts\n\n"
+                f"🔄 Auto Repost - Repost 5 random DiskWala posts\n"
+                f"📋 Check Files - Check and save DiskWala channel files to database\n\n"
                 f"Choose an option:",
                 MAIN_KEYBOARD
             )
@@ -443,6 +549,32 @@ def process_telegram_update(update):
                 )
             
             USER_STATE[chat_id] = {'step': 'main'}
+            return
+        
+        # --- CHECK FILES BUTTON ---
+        if text == 'Check Files':
+            USER_STATE[chat_id] = {'step': 'check_files_waiting'}
+            send_message(
+                chat_id,
+                "📋 Check & Save DiskWala Files\n\n"
+                "Forward me messages from the DiskWala channel one by one.\n"
+                "I'll check if they're saved in the database and give you an option to save them.\n\n"
+                "Type 'Cancel' to exit.",
+                {'keyboard': [[{'text': 'Cancel'}]], 'resize_keyboard': True}
+            )
+            return
+        
+        # --- CHECK FILES BUTTON ---
+        if text == 'Check Files':
+            USER_STATE[chat_id] = {'step': 'check_files_waiting'}
+            send_message(
+                chat_id,
+                "📋 Check & Save DiskWala Files\n\n"
+                "Forward me messages from the DiskWala channel one by one.\n"
+                "I'll check if they're saved in the database and give you an option to save them.\n\n"
+                "Type 'Cancel' to exit.",
+                {'keyboard': [[{'text': 'Cancel'}]], 'resize_keyboard': True}
+            )
             return
         
         # --- CANCEL BUTTON ---
@@ -628,6 +760,102 @@ def process_telegram_update(update):
             else:
                 send_message(chat_id, "⚠️ Please send photo, video, or document files.\n\nType 'Cancel' to finish.")
             return
+        
+        # --- CHECK FILES HANDLER ---
+        
+        elif user_state['step'] == 'check_files_waiting':
+            # Check if message is forwarded from DiskWala channel
+            if 'forward_from_chat' in message:
+                forward_chat_id = message['forward_from_chat']['id']
+                
+                # Only accept forwards from DiskWala channel
+                if forward_chat_id != GROUP_TELEGRAM_ID:
+                    send_message(chat_id, "⚠️ Please forward messages only from the DiskWala channel.")
+                    return
+                
+                message_id = message.get('forward_from_message_id')
+                
+                # Check if already in database
+                is_saved = check_message_in_database(message_id)
+                
+                if is_saved:
+                    send_message(
+                        chat_id,
+                        "✅ This file is already saved in database!\n\n"
+                        "It will appear in Auto Repost.\n\n"
+                        "Forward another message or type 'Cancel'.",
+                        {'keyboard': [[{'text': 'Cancel'}]], 'resize_keyboard': True}
+                    )
+                else:
+                    # Not saved - store message temporarily and offer to save
+                    USER_STATE[chat_id]['pending_message'] = message
+                    USER_STATE[chat_id]['step'] = 'check_files_save_prompt'
+                    
+                    # Get preview info
+                    media_type = "Unknown"
+                    if 'video' in message:
+                        media_type = "Video"
+                    elif 'photo' in message:
+                        media_type = "Photo"
+                    
+                    caption_preview = message.get('caption', 'No caption')[:100]
+                    
+                    send_message(
+                        chat_id,
+                        f"❌ This file is NOT saved in database!\n\n"
+                        f"📄 Type: {media_type}\n"
+                        f"📝 Caption: {caption_preview}...\n\n"
+                        f"Would you like to save it for Auto Repost?",
+                        CHECK_FILES_KEYBOARD
+                    )
+            else:
+                send_message(chat_id, "⚠️ Please forward a message from the DiskWala channel.\n\nType 'Cancel' to exit.")
+            return
+        
+        elif user_state['step'] == 'check_files_save_prompt':
+            if text == 'Save This File':
+                pending_message = user_state.get('pending_message')
+                
+                if pending_message:
+                    send_message(chat_id, "⏳ Saving to database...")
+                    
+                    result = save_forwarded_message_to_db(pending_message)
+                    
+                    if result:
+                        send_message(
+                            chat_id,
+                            f"✅ File saved successfully!\n"
+                            f"📊 Database ID: {result}\n\n"
+                            f"This file will now appear in Auto Repost.\n\n"
+                            f"Forward another message or type 'Cancel'.",
+                            {'keyboard': [[{'text': 'Cancel'}]], 'resize_keyboard': True}
+                        )
+                    else:
+                        send_message(
+                            chat_id,
+                            "❌ Failed to save file to database.\n\n"
+                            "Forward another message or type 'Cancel'.",
+                            {'keyboard': [[{'text': 'Cancel'}]], 'resize_keyboard': True}
+                        )
+                    
+                    USER_STATE[chat_id] = {'step': 'check_files_waiting'}
+                else:
+                    send_message(chat_id, "❌ No pending message found.")
+                return
+            
+            elif text == 'Next File' or text == 'Skip All':
+                USER_STATE[chat_id] = {'step': 'check_files_waiting'}
+                send_message(
+                    chat_id,
+                    "⏭️ Skipped. Forward another message from DiskWala channel or type 'Cancel'.",
+                    {'keyboard': [[{'text': 'Cancel'}]], 'resize_keyboard': True}
+                )
+                return
+            
+            elif text == 'Back to Menu':
+                USER_STATE[chat_id] = {'step': 'main'}
+                send_message(chat_id, "Returning to main menu...", MAIN_KEYBOARD)
+                return
         
         # Unknown command
         send_message(chat_id, "🤔 I don't understand. Use the buttons below.", MAIN_KEYBOARD)
