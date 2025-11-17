@@ -161,7 +161,8 @@ USER_STATE = {}
 MAIN_KEYBOARD = {
     'keyboard': [
         [{'text': 'DiskWala Posts'}, {'text': 'Video Files'}],
-        [{'text': 'Auto Repost'}, {'text': 'Cancel'}]
+        [{'text': 'Auto Repost'}, {'text': 'Check Files'}],
+        [{'text': 'Cancel'}]
     ],
     'resize_keyboard': True,
     'one_time_keyboard': False
