@@ -535,12 +535,15 @@ def process_telegram_update(update):
             post_result = send_media_post(title, media_id, media_type, diskwala_links)
             
             if post_result:
+                # Save to MongoDB for auto-repost functionality
                 content_data = {
                     "title": title,
                     "type": "video",
                     "thumbnail_url": f"telegram_file_id:{media_id}",
                     "post_type": f"diskwala_{media_type}",
                     "telegram_media_id": media_id,
+                    "telegram_message_id": post_result.get('message_id') if isinstance(post_result, dict) else None,
+                    "telegram_chat_id": GROUP_TELEGRAM_ID,
                     "diskwala_url": valid_urls[0],
                     "tags": title.lower().split(),
                     "links": diskwala_links,
@@ -551,15 +554,16 @@ def process_telegram_update(update):
                     send_message(
                         chat_id,
                         f"🎉 Success!\n\n"
-                        f"Post '{title}' published to DiskWala channel and saved to database.\n"
-                        f"ID: {content_id}",
+                        f"✅ Post '{title}' published to DiskWala channel\n"
+                        f"✅ Saved to database for Auto Repost\n"
+                        f"📊 Database ID: {content_id}",
                         MAIN_KEYBOARD
                     )
                 else:
                     send_message(
                         chat_id,
-                        f"✅ Post published to DiskWala channel.\n"
-                        f"❌ Failed to save to database.",
+                        f"✅ Post published to DiskWala channel\n"
+                        f"⚠️ Failed to save to database (Auto Repost won't include this post)",
                         MAIN_KEYBOARD
                     )
             else:
