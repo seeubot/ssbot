@@ -84,7 +84,7 @@ def get_next_sequence_value(sequence_name):
             {'_id': sequence_name},
             {'$inc': {'sequence_value': 1}},
             upsert=True,
-            return_document=ReturnDocument.AFTER
+            return_document=ReturnDocument.After
         )
         return result['sequence_value']
     except Exception as e:
@@ -376,23 +376,24 @@ def get_random_diskwala_content(limit=5):
         logger.error(f"Error fetching random content: {e}")
         return []
 
-def check_message_in_database(message_id):
+def check_message_in_database(message_id, chat_id=None):
     """Check if a message is already saved in database"""
     if content_collection is None:
         return False
     
     try:
-        doc = content_collection.find_one({
-            "telegram_message_id": message_id,
-            "telegram_chat_id": GROUP_TELEGRAM_ID
-        })
+        query = {"telegram_message_id": message_id}
+        if chat_id:
+            query["telegram_chat_id"] = chat_id
+            
+        doc = content_collection.find_one(query)
         return doc is not None
     except Exception as e:
         logger.error(f"Error checking message in database: {e}")
         return False
 
 def save_forwarded_message_to_db(message):
-    """Save a forwarded DiskWala message to database"""
+    """Save a forwarded message from ANY channel to database"""
     if content_collection is None:
         return False
     
@@ -410,21 +411,19 @@ def save_forwarded_message_to_db(message):
         if not media_id:
             return False
         
-        # Extract info from caption
-        caption = message.get('caption', '')
+        # Extract info from caption or text
+        caption = message.get('caption', message.get('text', ''))
         title = "Untitled Content"
         links = []
         
         if caption:
             import re
-            # Extract URLs
+            # Extract URLs - accept any URLs now, not just diskwala
             urls = re.findall(r'https?://[^\s]+', caption)
             if urls:
                 for i, url in enumerate(urls):
-                    # Basic check for diskwala URL
-                    is_diskwala_url = 'diskwala.com' in url or 'diskwala.in' in url
                     link_title = f'Link {i+1}'
-                    if i == 0 and is_diskwala_url:
+                    if i == 0:
                          link_title = "Watch Now"
                     
                     links.append({"url": url, "episode_title": link_title})
@@ -436,14 +435,24 @@ def save_forwarded_message_to_db(message):
             if title_clean and len(title_clean) > 3:
                 title = title_clean[:100]
         
+        # Get source chat info
+        source_chat_id = None
+        source_message_id = message.get('message_id')
+        
+        if 'forward_from_chat' in message:
+            source_chat_id = message['forward_from_chat']['id']
+            source_message_id = message.get('forward_from_message_id') or source_message_id
+        elif 'forward_from' in message:
+            source_chat_id = message['forward_from']['id']
+        
         content_data = {
             "title": title,
             "type": "video",
             "thumbnail_url": f"telegram_file_id:{media_id}",
             "post_type": f"diskwala_{media_type}",
             "telegram_media_id": media_id,
-            "telegram_message_id": message.get('forward_from_message_id') or message.get('message_id'),
-            "telegram_chat_id": message['forward_from_chat']['id'] if 'forward_from_chat' in message else GROUP_TELEGRAM_ID,
+            "telegram_message_id": source_message_id,
+            "telegram_chat_id": source_chat_id or GROUP_TELEGRAM_ID,
             "diskwala_url": links[0]['url'] if links else "",
             "tags": title.lower().split(),
             "links": links,
@@ -498,7 +507,7 @@ def process_telegram_update(update):
                 f"📁 DiskWala Posts - Post content with links to DiskWala channel\n"
                 f"🎬 Video Files - Forward files to Video Files channel\n"
                 f"🔄 Auto Repost - Repost 5 random DiskWala posts\n"
-                f"📋 Check Files - Check and save DiskWala channel files to database\n\n"
+                f"📋 Check Files - Check and save forwarded files from ANY channel to database\n\n"
                 f"Choose an option:",
                 MAIN_KEYBOARD
             )
@@ -557,8 +566,8 @@ def process_telegram_update(update):
             USER_STATE[chat_id] = {'step': 'check_files_waiting'}
             send_message(
                 chat_id,
-                "📋 Check & Save DiskWala Files\n\n"
-                "Forward me messages from the DiskWala channel one by one.\n"
+                "📋 Check & Save Files from ANY Channel\n\n"
+                "Forward me messages from ANY channel or bot.\n"
                 "I'll check if they're saved in the database and give you an option to save them.\n\n"
                 "Type 'Cancel' to exit.",
                 {'keyboard': [[{'text': 'Cancel'}]], 'resize_keyboard': True}
@@ -752,42 +761,24 @@ def process_telegram_update(update):
         # --- CHECK FILES HANDLER ---
         
         elif user_state['step'] == 'check_files_waiting':
-            # Check if message is forwarded from ANY channel
+            # Check if message is forwarded from ANY channel or bot
             if 'forward_from_chat' in message or 'forward_from' in message:
-                # Extract caption to check for diskwala.com URLs
+                # Extract caption to check for URLs
                 caption = message.get('caption', message.get('text', ''))
                 
-                # Check if message contains diskwala.com URL
-                import re
-                # Updated regex to capture diskwala.com or diskwala.in links
-                diskwala_urls = re.findall(r'https?://(?:www\.)?diskwala\.(?:com|in)/[^\s]+', caption)
-                
-                if not diskwala_urls:
-                    send_message(
-                        chat_id,
-                        "⚠️ This message doesn't contain a diskwala link (diskwala.com or diskwala.in).\n\n"
-                        "Please forward messages that have diskwala links.\n"
-                        "Type 'Cancel' to exit."
-                    )
-                    return
-                
-                # Get message ID for checking
+                # Get message ID and source chat info for checking
                 message_id = message.get('forward_from_message_id') or message.get('message_id')
                 forward_chat_id = None
                 
                 if 'forward_from_chat' in message:
                     forward_chat_id = message['forward_from_chat']['id']
                 
-                logger.info(f"Checking forwarded message ID: {message_id} with {len(diskwala_urls)} diskwala URLs")
+                logger.info(f"Checking forwarded message ID: {message_id} from chat: {forward_chat_id}")
                 
-                # Check if already in database
-                is_saved = False
+                # Check if already in database by message_id and chat_id
+                is_saved = check_message_in_database(message_id, forward_chat_id)
                 
-                # 1. Check by message_id if from DiskWala channel
-                if forward_chat_id == GROUP_TELEGRAM_ID:
-                    is_saved = check_message_in_database(message_id)
-                
-                # 2. Also check by media file_id to avoid duplicates if message ID is not definitive
+                # Also check by media file_id to avoid duplicates
                 if not is_saved:
                     media_id = None
                     if 'video' in message:
@@ -795,13 +786,13 @@ def process_telegram_update(update):
                     elif 'photo' in message:
                         media_id = message['photo'][-1]['file_id']
                     
-                    if media_id and content_collection:
+                    if media_id and content_collection is not None:
                         try:
                             # Find document where telegram_media_id matches
                             doc = content_collection.find_one({"telegram_media_id": media_id})
                             is_saved = doc is not None
-                        except:
-                            pass
+                        except Exception as e:
+                            logger.error(f"Error checking media ID: {e}")
                 
                 if is_saved:
                     send_message(
@@ -826,19 +817,28 @@ def process_telegram_update(update):
                         media_type = "Document"
                     
                     caption_preview = caption[:100] + '...' if len(caption) > 100 else caption
-                    urls_found = f"Found {len(diskwala_urls)} diskwala URL(s)"
+                    
+                    # Get source info
+                    source_info = "Unknown source"
+                    if 'forward_from_chat' in message:
+                        chat_title = message['forward_from_chat'].get('title', 'Unknown Channel')
+                        source_info = f"Channel: {chat_title}"
+                    elif 'forward_from' in message:
+                        user = message['forward_from']
+                        user_name = user.get('username', f"{user.get('first_name', '')} {user.get('last_name', '')}".strip())
+                        source_info = f"User: {user_name}"
                     
                     send_message(
                         chat_id,
                         f"❌ This file is NOT saved in database!\n\n"
                         f"📄 Type: {media_type}\n"
-                        f"🔗 {urls_found}\n"
-                        f"📝 Caption: {caption_preview}\n\n"
+                        f"📝 Source: {source_info}\n"
+                        f"📋 Caption: {caption_preview}\n\n"
                         f"Would you like to save it for Auto Repost?",
                         CHECK_FILES_KEYBOARD
                     )
             else:
-                send_message(chat_id, "⚠️ Please forward a message from any channel.\n\nType 'Cancel' to exit.")
+                send_message(chat_id, "⚠️ Please forward a message from any channel or bot.\n\nType 'Cancel' to exit.")
             return
         
         elif user_state['step'] == 'check_files_save_prompt':
@@ -876,7 +876,7 @@ def process_telegram_update(update):
                 USER_STATE[chat_id] = {'step': 'check_files_waiting'}
                 send_message(
                     chat_id,
-                    "⏭️ Skipped. Forward another message from DiskWala channel or type 'Cancel'.",
+                    "⏭️ Skipped. Forward another message from any channel or type 'Cancel'.",
                     {'keyboard': [[{'text': 'Cancel'}]], 'resize_keyboard': True}
                 )
                 return
@@ -1149,4 +1149,3 @@ if __name__ == '__main__':
     
     logger.info(f"Starting Flask app on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
-
