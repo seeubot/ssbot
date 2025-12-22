@@ -10,10 +10,14 @@ import logging
 import threading
 from cachetools import TTLCache
 from functools import wraps
+import time
+import atexit
+import signal
 
 # --- CONSTANTS & CONFIGURATION ---
 ADMIN_TELEGRAM_ID = 1352497419
 GROUP_TELEGRAM_ID = -1002541647242  # DiskWala Channel
+TELUGU_GROUP_ID = -4756763810  # Telugu Channel
 CONTENT_FORWARD_CHANNEL_ID = -1002776780769  # Video Files Channel
 PRODUCT_NAME = "Adult-Hub"
 
@@ -48,6 +52,7 @@ def init_mongodb():
         # Create indexes
         content_collection.create_index([("created_at", -1)])
         content_collection.create_index([("tags", 1)])
+        content_collection.create_index([("channel", 1)])
         
         logger.info(f"MongoDB connected: {db_name}.{collection_name}")
         return True
@@ -103,7 +108,7 @@ def cached_response(f):
 
 # --- VIEW TRACKING ---
 view_cache = {}
-view_lock = threading.Lock()
+view_lock = threading.RLock()
 
 def track_view(content_id):
     with view_lock:
@@ -121,16 +126,16 @@ CORS(app)
 
 USER_STATE = {}
 
-# Simplified keyboards
+# Updated keyboards with Telugu option
 MAIN_KEYBOARD = {
     'keyboard': [
-        [{'text': 'DiskWala Posts'}, {'text': 'Video Files'}],
-        [{'text': 'Cancel'}]
+        [{'text': 'DiskWala Posts'}, {'text': 'Telugu Posts'}],
+        [{'text': 'Video Files'}, {'text': 'Cancel'}]
     ],
     'resize_keyboard': True
 }
 
-DISKWALA_MODE_KEYBOARD = {
+CHANNEL_MODE_KEYBOARD = {
     'keyboard': [
         [{'text': 'Single Post'}, {'text': 'Forward Multiple'}],
         [{'text': 'Back to Menu'}]
@@ -168,7 +173,8 @@ def send_message(chat_id, text, keyboard=None):
         payload['reply_markup'] = json.dumps(keyboard)
     return send_telegram('sendMessage', payload)
 
-def send_media_post(title, media_id, media_type, links):
+def send_media_post(title, media_id, media_type, links, channel_id, channel_name):
+    """Send media post to specified channel"""
     if not TELEGRAM_API:
         return False
 
@@ -178,7 +184,17 @@ def send_media_post(title, media_id, media_type, links):
     method = 'sendPhoto' if media_type == 'photo' else 'sendVideo'
     key = 'photo' if media_type == 'photo' else 'video'
     
-    return send_telegram(method, {'chat_id': GROUP_TELEGRAM_ID, key: media_id, 'caption': caption})
+    return send_telegram(method, {'chat_id': channel_id, key: media_id, 'caption': caption})
+
+# --- URL VALIDATION ---
+def validate_url(url):
+    """Validate URL format"""
+    from urllib.parse import urlparse
+    try:
+        result = urlparse(url)
+        return all([result.scheme in ['http', 'https'], result.netloc])
+    except:
+        return False
 
 # --- CONTENT MANAGEMENT ---
 
@@ -192,6 +208,7 @@ def save_content(data):
         doc = {
             "title": data.get('title'),
             "type": data.get('type'),
+            "channel": data.get('channel', 'diskwala'),  # Track which channel
             "thumbnail_url": data.get('thumbnail_url'),
             "post_type": data.get('post_type'),
             "telegram_media_id": data.get('telegram_media_id'),
@@ -211,18 +228,40 @@ def save_content(data):
         logger.error(f"Save error: {e}")
         return False
 
+# --- STATE CLEANUP ---
+USER_STATE_TIMEOUT = 3600  # 1 hour
+
+def cleanup_old_states():
+    """Clean up expired user states"""
+    while True:
+        threading.Event().wait(300)  # Every 5 minutes
+        current_time = time.time()
+        try:
+            with view_lock:
+                expired = [
+                    chat_id for chat_id, state in USER_STATE.items()
+                    if current_time - state.get('timestamp', 0) > USER_STATE_TIMEOUT
+                ]
+                for chat_id in expired:
+                    USER_STATE.pop(chat_id, None)
+                if expired:
+                    logger.info(f"Cleaned {len(expired)} expired states")
+        except Exception as e:
+            logger.error(f"State cleanup error: {e}")
+
 # --- TELEGRAM UPDATE HANDLER ---
 
 def process_update(update):
     try:
         message = update.get('message')
         if not message:
+            logger.warning(f"No message in update: {update.get('update_id')}")
             return
             
         chat_id = message['chat']['id']
         
-        # Ignore messages from DiskWala channel
-        if chat_id == GROUP_TELEGRAM_ID:
+        # Ignore messages from channels
+        if chat_id in [GROUP_TELEGRAM_ID, TELUGU_GROUP_ID]:
             return
         
         text = message.get('text', '').strip()
@@ -233,15 +272,16 @@ def process_update(update):
             send_message(chat_id, "❌ Access Denied. Administrator only.")
             return
         
-        state = USER_STATE.get(chat_id, {'step': 'main'})
+        state = USER_STATE.get(chat_id, {'step': 'main', 'timestamp': time.time()})
         
         # --- MAIN MENU ---
         if text in ['/start', 'Back to Menu', 'Cancel']:
-            USER_STATE[chat_id] = {'step': 'main'}
+            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
             send_message(
                 chat_id, 
                 f"🚀 {PRODUCT_NAME} Admin Bot\n\n"
-                f"📁 DiskWala Posts - Post content to channel\n"
+                f"📁 DiskWala Posts - Post to DiskWala channel\n"
+                f"🇮🇳 Telugu Posts - Post to Telugu channel\n"
                 f"🎬 Video Files - Forward files to video channel\n\n"
                 f"Choose an option:",
                 MAIN_KEYBOARD
@@ -250,20 +290,45 @@ def process_update(update):
         
         # --- DISKWALA POSTS ---
         if text == 'DiskWala Posts':
-            USER_STATE[chat_id] = {'step': 'diskwala_mode'}
+            USER_STATE[chat_id] = {
+                'step': 'channel_mode',
+                'channel_type': 'diskwala',
+                'channel_id': GROUP_TELEGRAM_ID,
+                'channel_name': 'DiskWala',
+                'timestamp': time.time()
+            }
             send_message(
                 chat_id,
                 "📁 DiskWala Posts\n\n"
                 "✏️ Single Post - Create one post\n"
                 "📨 Forward Multiple - Forward directly\n\n"
                 "Choose method:",
-                DISKWALA_MODE_KEYBOARD
+                CHANNEL_MODE_KEYBOARD
+            )
+            return
+        
+        # --- TELUGU POSTS ---
+        if text == 'Telugu Posts':
+            USER_STATE[chat_id] = {
+                'step': 'channel_mode',
+                'channel_type': 'telugu',
+                'channel_id': TELUGU_GROUP_ID,
+                'channel_name': 'Telugu',
+                'timestamp': time.time()
+            }
+            send_message(
+                chat_id,
+                "🇮🇳 Telugu Posts\n\n"
+                "✏️ Single Post - Create one post\n"
+                "📨 Forward Multiple - Forward directly\n\n"
+                "Choose method:",
+                CHANNEL_MODE_KEYBOARD
             )
             return
         
         # --- VIDEO FILES ---
         if text == 'Video Files':
-            USER_STATE[chat_id] = {'step': 'video_files'}
+            USER_STATE[chat_id] = {'step': 'video_files', 'timestamp': time.time()}
             send_message(
                 chat_id,
                 "🎬 Video Files Mode\n\n"
@@ -272,25 +337,30 @@ def process_update(update):
             )
             return
         
-        # --- DISKWALA MODE ---
-        if state['step'] == 'diskwala_mode':
+        # --- CHANNEL MODE SELECTION ---
+        if state['step'] == 'channel_mode':
+            channel_name = state.get('channel_name', 'Channel')
+            
             if text == 'Single Post':
-                USER_STATE[chat_id] = {'step': 'diskwala_media', 'data': {}}
-                send_message(chat_id, "📤 Step 1/3: Send thumbnail (photo/video)")
+                USER_STATE[chat_id]['step'] = 'channel_media'
+                USER_STATE[chat_id]['data'] = {}
+                USER_STATE[chat_id]['timestamp'] = time.time()
+                send_message(chat_id, f"📤 {channel_name} - Step 1/3: Send thumbnail (photo/video)")
                 return
             
             elif text == 'Forward Multiple':
-                USER_STATE[chat_id] = {'step': 'diskwala_forward'}
+                USER_STATE[chat_id]['step'] = 'channel_forward'
+                USER_STATE[chat_id]['timestamp'] = time.time()
                 send_message(
                     chat_id,
-                    "📨 Forward messages to me.\n"
-                    "I'll forward them to DiskWala channel.\n\n"
+                    f"📨 Forward messages to {channel_name} channel.\n\n"
+                    "Forward messages to me and I'll send them to the channel.\n\n"
                     "Type 'Cancel' when done."
                 )
                 return
         
         # --- SINGLE POST FLOW ---
-        if state['step'] == 'diskwala_media':
+        if state['step'] == 'channel_media':
             media_id = None
             media_type = None
             
@@ -302,71 +372,84 @@ def process_update(update):
                 media_type = 'photo'
             
             if media_id:
-                USER_STATE[chat_id]['data'] = {'telegram_media_id': media_id, 'media_type': media_type}
-                USER_STATE[chat_id]['step'] = 'diskwala_title'
+                USER_STATE[chat_id]['data'] = {
+                    'telegram_media_id': media_id, 
+                    'media_type': media_type
+                }
+                USER_STATE[chat_id]['step'] = 'channel_title'
+                USER_STATE[chat_id]['timestamp'] = time.time()
                 send_message(chat_id, f"✅ {media_type.title()} saved!\n\nStep 2/3: Send title")
             else:
                 send_message(chat_id, "❌ Send photo or video")
             return
         
-        elif state['step'] == 'diskwala_title':
+        elif state['step'] == 'channel_title':
             USER_STATE[chat_id]['data']['title'] = text.strip()
-            USER_STATE[chat_id]['step'] = 'diskwala_urls'
+            USER_STATE[chat_id]['step'] = 'channel_urls'
+            USER_STATE[chat_id]['timestamp'] = time.time()
             send_message(chat_id, "✅ Title saved!\n\nStep 3/3: Send URLs (one per line)")
             return
         
-        elif state['step'] == 'diskwala_urls':
-            urls = [url.strip() for url in text.strip().split('\n') if url.strip().startswith('http')]
+        elif state['step'] == 'channel_urls':
+            urls = [url.strip() for url in text.strip().split('\n') 
+                   if url.strip() and validate_url(url.strip())]
             
             if not urls:
-                send_message(chat_id, "❌ Send valid URLs")
+                send_message(chat_id, "❌ Send valid URLs (http:// or https://)")
                 return
             
             title = state['data']['title']
             media_id = state['data']['telegram_media_id']
             media_type = state['data']['media_type']
+            channel_id = state.get('channel_id', GROUP_TELEGRAM_ID)
+            channel_name = state.get('channel_name', 'Channel')
+            channel_type = state.get('channel_type', 'diskwala')
             
             links = [{"url": url, "episode_title": "Watch Now" if i == 0 else f"Link {i+1}"} 
                      for i, url in enumerate(urls)]
             
-            send_message(chat_id, "⏳ Posting...")
+            send_message(chat_id, f"⏳ Posting to {channel_name}...")
             
-            result = send_media_post(title, media_id, media_type, links)
+            result = send_media_post(title, media_id, media_type, links, channel_id, channel_name)
             
             if result:
                 content_id = save_content({
                     "title": title,
                     "type": "video",
+                    "channel": channel_type,
                     "thumbnail_url": f"telegram_file_id:{media_id}",
-                    "post_type": f"diskwala_{media_type}",
+                    "post_type": f"{channel_type}_{media_type}",
                     "telegram_media_id": media_id,
                     "telegram_message_id": result.get('message_id') if isinstance(result, dict) else None,
-                    "telegram_chat_id": GROUP_TELEGRAM_ID,
+                    "telegram_chat_id": channel_id,
                     "diskwala_url": urls[0],
                     "tags": title.lower().split(),
                     "links": links,
                 })
                 
-                msg = f"🎉 Success!\n✅ Posted to channel"
+                msg = f"🎉 Success!\n✅ Posted to {channel_name} channel"
                 if content_id:
-                    msg += f"\n📊 ID: {content_id}"
+                    msg += f"\n📊 Content ID: {content_id}"
                 send_message(chat_id, msg, MAIN_KEYBOARD)
             else:
-                send_message(chat_id, "❌ Failed to post", MAIN_KEYBOARD)
+                send_message(chat_id, f"❌ Failed to post to {channel_name}", MAIN_KEYBOARD)
             
-            USER_STATE[chat_id] = {'step': 'main'}
+            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
             return
         
         # --- FORWARD MULTIPLE ---
-        elif state['step'] == 'diskwala_forward':
+        elif state['step'] == 'channel_forward':
             if 'forward_from' in message or 'forward_from_chat' in message:
+                channel_id = state.get('channel_id', GROUP_TELEGRAM_ID)
+                channel_name = state.get('channel_name', 'Channel')
+                
                 result = send_telegram('copyMessage', {
-                    'chat_id': GROUP_TELEGRAM_ID,
+                    'chat_id': channel_id,
                     'from_chat_id': chat_id,
                     'message_id': message['message_id'],
                 })
                 
-                send_message(chat_id, "✅ Forwarded" if result else "❌ Failed")
+                send_message(chat_id, f"✅ Forwarded to {channel_name}" if result else "❌ Failed")
             else:
                 send_message(chat_id, "⚠️ Forward messages from other chats")
             return
@@ -390,8 +473,11 @@ def process_update(update):
             return
         
     except Exception as e:
-        logger.error(f"Process error: {e}")
-        send_message(chat_id, "🚨 Error occurred", MAIN_KEYBOARD)
+        logger.error(f"Process error: {e}", exc_info=True)
+        try:
+            send_message(chat_id, "🚨 Error occurred. Please try again.", MAIN_KEYBOARD)
+        except:
+            pass
 
 # --- FLASK ROUTES ---
 
@@ -415,13 +501,35 @@ def index():
 
 @app.route('/health', methods=['GET'])
 def health():
+    status = {"status": "healthy", "components": {}}
+    
+    # Check MongoDB
     try:
         if client:
             client.admin.command('ping')
-            return jsonify({"status": "healthy", "db": "connected"}), 200
-    except:
-        pass
-    return jsonify({"status": "unhealthy"}), 503
+            status["components"]["mongodb"] = "ok"
+        else:
+            status["components"]["mongodb"] = "not_configured"
+            status["status"] = "degraded"
+    except Exception as e:
+        status["components"]["mongodb"] = f"error: {str(e)}"
+        status["status"] = "unhealthy"
+    
+    # Check Telegram
+    if TELEGRAM_API:
+        try:
+            result = send_telegram('getMe', {})
+            status["components"]["telegram"] = "ok" if result else "error"
+            if not result:
+                status["status"] = "unhealthy"
+        except Exception as e:
+            status["components"]["telegram"] = f"error: {str(e)}"
+            status["status"] = "unhealthy"
+    else:
+        status["components"]["telegram"] = "not_configured"
+        status["status"] = "degraded"
+    
+    return jsonify(status), 200 if status["status"] == "healthy" else 503
 
 @app.route('/api/track-view', methods=['POST'])
 def api_track_view():
@@ -453,6 +561,9 @@ def get_content():
         
         if content_type := request.args.get('type'):
             query['type'] = content_type
+        
+        if channel := request.args.get('channel'):
+            query['channel'] = channel.lower()
             
         if tag := request.args.get('tag'):
             query['tags'] = tag.lower()
@@ -461,7 +572,7 @@ def get_content():
             regex = {"$regex": search, "$options": "i"}
             query['$or'] = [{"title": regex}, {"tags": regex}]
 
-        projection = {'title': 1, 'type': 1, 'thumbnail_url': 1, 'tags': 1, 'views': 1, 'created_at': 1, 'links': 1}
+        projection = {'title': 1, 'type': 1, 'channel': 1, 'thumbnail_url': 1, 'tags': 1, 'views': 1, 'created_at': 1, 'links': 1}
         
         total = content_collection.count_documents(query)
         cursor = content_collection.find(query, projection).sort("created_at", -1).skip(skip).limit(limit)
@@ -527,27 +638,49 @@ def get_similar(tags):
         logger.error(f"Similar error: {e}")
         return jsonify({"error": "Failed"}), 500
 
+@app.route('/api/channels', methods=['GET'])
+def get_channels():
+    """Get list of available channels"""
+    return jsonify({
+        "success": True,
+        "channels": [
+            {"id": "diskwala", "name": "DiskWala", "telegram_id": GROUP_TELEGRAM_ID},
+            {"id": "telugu", "name": "Telugu", "telegram_id": TELUGU_GROUP_ID}
+        ]
+    }), 200
+
 # --- BACKGROUND TASKS ---
 
-def flush_views():
+def flush_views_once():
+    """Flush all pending views to DB"""
+    try:
+        with view_lock:
+            if not view_cache or not content_collection:
+                return
+            
+            from pymongo import UpdateOne
+            
+            bulk_ops = [
+                UpdateOne(
+                    {"_id": ObjectId(cid)},
+                    {"$inc": {"views": count}}
+                ) for cid, count in view_cache.items()
+                if count > 0 and ObjectId.is_valid(cid)
+            ]
+            
+            if bulk_ops:
+                content_collection.bulk_write(bulk_ops, ordered=False)
+                logger.info(f"Flushed {len(bulk_ops)} view updates")
+            
+            view_cache.clear()
+    except Exception as e:
+        logger.error(f"Flush error: {e}")
+
+def flush_views_loop():
+    """Periodic view flush loop"""
     while True:
-        threading.Event().wait(30)  # Flush every 30 seconds
-        try:
-            with view_lock:
-                if not view_cache or not content_collection:
-                    continue
-                
-                for content_id, count in list(view_cache.items()):
-                    if count > 0 and ObjectId.is_valid(content_id):
-                        content_collection.update_one(
-                            {"_id": ObjectId(content_id)},
-                            {"$inc": {"views": count}}
-                        )
-                
-                view_cache.clear()
-                logger.info("Views flushed")
-        except Exception as e:
-            logger.error(f"Flush error: {e}")
+        threading.Event().wait(30)
+        flush_views_once()
 
 def set_webhook():
     if not APP_URL or not BOT_TOKEN:
@@ -567,14 +700,19 @@ if __name__ == '__main__':
     
     init_mongodb()
     
-    # Start background flush
-    threading.Thread(target=flush_views, daemon=True).start()
+    # Start background tasks
+    threading.Thread(target=flush_views_loop, daemon=True).start()
+    threading.Thread(target=cleanup_old_states, daemon=True).start()
+    
+    # Register shutdown handler
+    atexit.register(flush_views_once)
+    signal.signal(signal.SIGTERM, lambda s, f: flush_views_once())
     
     if APP_URL and BOT_TOKEN:
         if set_webhook():
-            logger.info("Webhook set")
+            logger.info("Webhook set successfully")
         else:
-            logger.error("Webhook failed")
+            logger.error("Webhook setup failed")
     
-    logger.info(f"Starting on port {PORT}")
+    logger.info(f"Starting server on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
