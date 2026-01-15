@@ -1,7 +1,7 @@
 import os
 import json
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS 
 from pymongo import MongoClient
 from bson import ObjectId
@@ -13,6 +13,7 @@ from functools import wraps
 import time
 import atexit
 import signal
+from werkzeug.utils import secure_filename
 
 # --- CONSTANTS & CONFIGURATION ---
 ADMIN_TELEGRAM_ID = 1352497419
@@ -36,9 +37,10 @@ db = None
 content_collection = None
 counter_collection = None
 broadcast_collection = None
+requests_collection = None  # For video requests
 
 def init_mongodb():
-    global client, db, content_collection, counter_collection, broadcast_collection
+    global client, db, content_collection, counter_collection, broadcast_collection, requests_collection
     
     try:
         client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
@@ -51,12 +53,16 @@ def init_mongodb():
         content_collection = db[collection_name]
         counter_collection = db["counters"]
         broadcast_collection = db["broadcasts"]
+        requests_collection = db["video_requests"]  # Collection for video requests
         
         # Create indexes
         content_collection.create_index([("created_at", -1)])
         content_collection.create_index([("tags", 1)])
         content_collection.create_index([("channel", 1)])
         broadcast_collection.create_index([("created_at", -1)])
+        requests_collection.create_index([("status", 1)])
+        requests_collection.create_index([("views", -1)])
+        requests_collection.create_index([("createdAt", -1)])
         
         logger.info(f"MongoDB connected: {db_name}.{collection_name}")
         return True
@@ -120,8 +126,23 @@ def track_view(content_id):
 
 # --- TELEGRAM SETUP ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 APP_URL = os.environ.get("APP_URL")
 PORT = int(os.environ.get("PORT", 8000))
+
+# --- FILE UPLOAD CONFIGURATION ---
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'avi', 'mov', 'mkv'}
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def is_image(filename):
+    return filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'gif'}
+
+def is_video(filename):
+    return filename.rsplit('.', 1)[1].lower() in {'mp4', 'avi', 'mov', 'mkv'}
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/" if BOT_TOKEN else None
 
@@ -142,7 +163,7 @@ MAIN_KEYBOARD = {
     'keyboard': [
         [{'text': 'DiskWala Posts'}, {'text': 'Telugu Posts'}],
         [{'text': 'Video Files'}, {'text': '📢 Broadcast'}],
-        [{'text': '🌐 Open WebApp', 'web_app': {'url': WEBAPP_URL}}],
+        [{'text': '📥 Video Requests'}, {'text': '🌐 Open WebApp', 'web_app': {'url': WEBAPP_URL}}],
         [{'text': 'Cancel'}]
     ],
     'resize_keyboard': True
@@ -160,6 +181,14 @@ BROADCAST_KEYBOARD = {
     'keyboard': [
         [{'text': '📺 DiskWala'}, {'text': '🇮🇳 Telugu'}],
         [{'text': '🎬 Video Files'}, {'text': '📡 All Channels'}],
+        [{'text': 'Back to Menu'}]
+    ],
+    'resize_keyboard': True
+}
+
+REQUESTS_KEYBOARD = {
+    'keyboard': [
+        [{'text': '📋 Pending Requests'}, {'text': '📊 All Requests'}],
         [{'text': 'Back to Menu'}]
     ],
     'resize_keyboard': True
@@ -263,6 +292,154 @@ def save_broadcast_log(admin_id, channels, message, results):
     except Exception as e:
         logger.error(f"Broadcast log error: {e}")
 
+# --- VIDEO REQUEST FUNCTIONS ---
+
+def notify_admins_new_request(request_doc):
+    """Notify Telegram admins about new video request"""
+    try:
+        admin_chat_ids = get_admin_chat_ids()
+        
+        message = f"""
+🆕 New Video Request
+
+📝 Description: {request_doc.get('description', 'No description')}
+🆔 Request ID: {request_doc['_id']}
+📅 Date: {request_doc['createdAt'].strftime('%Y-%m-%d %H:%M')}
+
+Use /complete {request_doc['_id']} <video_url> to mark as completed
+        """
+        
+        for chat_id in admin_chat_ids:
+            send_message(chat_id, message)
+            
+            # Send media if available
+            if request_doc.get('mediaUrl'):
+                if request_doc.get('mediaType') == 'image':
+                    send_telegram_photo(chat_id, request_doc['mediaUrl'])
+                elif request_doc.get('mediaType') == 'video':
+                    send_telegram_video(chat_id, request_doc['mediaUrl'])
+    except Exception as e:
+        logger.error(f"Error notifying admins: {e}")
+
+def send_telegram_photo(chat_id, photo_url):
+    """Send photo via Telegram"""
+    url = f"{TELEGRAM_API_URL}/sendPhoto"
+    data = {'chat_id': chat_id, 'photo': photo_url}
+    try:
+        requests.post(url, data=data, timeout=10)
+    except Exception as e:
+        logger.error(f"Telegram photo error: {e}")
+
+def send_telegram_video(chat_id, video_url):
+    """Send video via Telegram"""
+    url = f"{TELEGRAM_API_URL}/sendVideo"
+    data = {'chat_id': chat_id, 'video': video_url}
+    try:
+        requests.post(url, data=data, timeout=10)
+    except Exception as e:
+        logger.error(f"Telegram video error: {e}")
+
+def get_admin_chat_ids():
+    """Get list of admin chat IDs from database or config"""
+    try:
+        if db:
+            admins_collection = db['admins']
+            admins = list(admins_collection.find())
+            return [admin['chat_id'] for admin in admins]
+    except Exception as e:
+        logger.error(f"Get admin IDs error: {e}")
+    
+    # Fallback to admin ID if no database
+    return [ADMIN_TELEGRAM_ID]
+
+def handle_complete_command(chat_id, text):
+    """Handle /complete command from admin for video requests"""
+    try:
+        parts = text.split(maxsplit=2)
+        if len(parts) < 3:
+            send_message(chat_id, "Usage: /complete <request_id> <video_url>")
+            return
+        
+        request_id = parts[1]
+        video_url = parts[2]
+        
+        # Update request
+        result = requests_collection.update_one(
+            {'_id': ObjectId(request_id)},
+            {
+                '$set': {
+                    'status': 'completed',
+                    'videoResult': video_url,
+                    'updatedAt': datetime.utcnow()
+                }
+            }
+        )
+        
+        if result.modified_count > 0:
+            send_message(chat_id, f"✅ Request {request_id} marked as completed!")
+        else:
+            send_message(chat_id, f"❌ Request {request_id} not found")
+            
+    except Exception as e:
+        send_message(chat_id, f"Error: {str(e)}")
+
+def handle_requests_command(chat_id):
+    """Handle /requests command to show pending requests"""
+    try:
+        pending = list(requests_collection.find({'status': 'pending'}).sort('createdAt', -1).limit(10))
+        
+        if not pending:
+            send_message(chat_id, "No pending requests")
+            return
+        
+        message = "📋 Pending Requests:\n\n"
+        for req in pending:
+            message += f"🆔 {str(req['_id'])}\n"
+            message += f"📝 {req.get('description', 'No description')[:50]}\n"
+            message += f"📅 {req['createdAt'].strftime('%Y-%m-%d %H:%M')}\n\n"
+        
+        send_message(chat_id, message)
+        
+    except Exception as e:
+        send_message(chat_id, f"Error: {str(e)}")
+
+def handle_all_requests_command(chat_id):
+    """Show all requests with status"""
+    try:
+        all_requests = list(requests_collection.find().sort('createdAt', -1).limit(20))
+        
+        if not all_requests:
+            send_message(chat_id, "No requests found")
+            return
+        
+        message = "📊 All Requests:\n\n"
+        for req in all_requests:
+            status_emoji = "✅" if req['status'] == 'completed' else "⏳" if req['status'] == 'pending' else "❌"
+            message += f"{status_emoji} {str(req['_id'])[:8]}... - {req['status']}\n"
+            message += f"📝 {req.get('description', 'No description')[:40]}...\n"
+            message += f"👁️ {req.get('views', 0)} views\n\n"
+        
+        send_message(chat_id, message)
+        
+    except Exception as e:
+        send_message(chat_id, f"Error: {str(e)}")
+
+def handle_add_admin_command(chat_id):
+    """Add user as admin"""
+    try:
+        if db:
+            admins_collection = db['admins']
+            admins_collection.update_one(
+                {'chat_id': chat_id},
+                {'$set': {'chat_id': chat_id, 'addedAt': datetime.utcnow()}},
+                upsert=True
+            )
+            send_message(chat_id, "✅ You are now an admin!")
+        else:
+            send_message(chat_id, "❌ Database not available")
+    except Exception as e:
+        send_message(chat_id, f"❌ Error: {str(e)}")
+
 # --- URL VALIDATION ---
 def validate_url(url):
     """Validate URL format"""
@@ -361,11 +538,38 @@ def process_update(update):
                 f"🇮🇳 Telugu Posts - Post to Telugu channel\n"
                 f"🎬 Video Files - Forward files to video channel\n"
                 f"📢 Broadcast - Send message to channels\n"
+                f"📥 Video Requests - Manage video requests\n"
                 f"🌐 Open WebApp - Access web interface\n\n"
                 f"Choose an option:",
                 MAIN_KEYBOARD
             )
             return
+        
+        # --- VIDEO REQUESTS ---
+        if text == '📥 Video Requests':
+            USER_STATE[chat_id] = {'step': 'requests_menu', 'timestamp': time.time()}
+            send_message(
+                chat_id,
+                "📥 Video Requests Management\n\n"
+                "📋 Pending Requests - View pending requests\n"
+                "📊 All Requests - View all requests\n\n"
+                "You can also use commands:\n"
+                "/complete <request_id> <video_url>\n"
+                "/requests - Show pending requests",
+                REQUESTS_KEYBOARD
+            )
+            return
+        
+        # --- REQUESTS MENU ---
+        if state['step'] == 'requests_menu':
+            if text == '📋 Pending Requests':
+                handle_requests_command(chat_id)
+                USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+                return
+            elif text == '📊 All Requests':
+                handle_all_requests_command(chat_id)
+                USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+                return
         
         # --- BROADCAST ---
         if text == '📢 Broadcast':
@@ -381,6 +585,19 @@ def process_update(update):
                 "Choose target:",
                 BROADCAST_KEYBOARD
             )
+            return
+        
+        # --- Handle commands ---
+        if text.startswith('/complete'):
+            handle_complete_command(chat_id, text)
+            return
+        
+        if text.startswith('/requests'):
+            handle_requests_command(chat_id)
+            return
+        
+        if text.startswith('/addadmin'):
+            handle_add_admin_command(chat_id)
             return
         
         # --- BROADCAST CHANNEL SELECTION ---
@@ -649,6 +866,7 @@ def process_update(update):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """Telegram webhook handler"""
     if not BOT_TOKEN:
         return jsonify({"status": "not configured"}), 200
         
@@ -661,12 +879,268 @@ def webhook():
         logger.error(f"Webhook error: {e}")
         return jsonify({"status": "error"}), 500
 
+@app.route('/webhook/telegram', methods=['POST'])
+def telegram_webhook():
+    """Handle Telegram webhook updates for video requests"""
+    try:
+        update = request.get_json()
+        
+        if 'message' in update:
+            message = update['message']
+            chat_id = message['chat']['id']
+            text = message.get('text', '')
+            
+            # Handle /complete command
+            if text.startswith('/complete'):
+                handle_complete_command(chat_id, text)
+            
+            # Handle /requests command
+            elif text.startswith('/requests'):
+                handle_requests_command(chat_id)
+            
+            # Handle /addadmin command
+            elif text.startswith('/addadmin'):
+                handle_add_admin_command(chat_id)
+        
+        return jsonify({'ok': True}), 200
+        
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# --- VIDEO REQUEST ROUTES ---
+
+@app.route('/api/request', methods=['POST'])
+def create_request():
+    """Create a new video request"""
+    try:
+        description = request.form.get('description', '')
+        media_url = None
+        media_type = None
+        
+        # Handle file upload
+        if 'file' in request.files:
+            file = request.files['file']
+            if file and allowed_file(file.filename):
+                filename = secure_filename(file.filename)
+                timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+                filename = f"{timestamp}_{filename}"
+                filepath = os.path.join(UPLOAD_FOLDER, filename)
+                file.save(filepath)
+                
+                # Generate public URL (adjust based on your deployment)
+                base_url = request.host_url.rstrip('/')
+                media_url = f"{base_url}/uploads/{filename}"
+                media_type = 'image' if is_image(filename) else 'video'
+        
+        # Handle URL submission
+        elif 'url' in request.form:
+            media_url = request.form.get('url')
+            # Determine type from URL extension
+            if any(ext in media_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif']):
+                media_type = 'image'
+            elif any(ext in media_url.lower() for ext in ['.mp4', '.avi', '.mov']):
+                media_type = 'video'
+            else:
+                media_type = 'unknown'
+        
+        # Create request document
+        request_doc = {
+            'description': description,
+            'mediaUrl': media_url,
+            'mediaType': media_type,
+            'status': 'pending',
+            'videoResult': None,
+            'views': 0,
+            'createdAt': datetime.utcnow(),
+            'updatedAt': datetime.utcnow()
+        }
+        
+        if not requests_collection:
+            return jsonify({'error': 'Database not configured'}), 503
+            
+        result = requests_collection.insert_one(request_doc)
+        request_doc['_id'] = str(result.inserted_id)
+        
+        # Notify admins via Telegram
+        notify_admins_new_request(request_doc)
+        
+        return jsonify({
+            'success': True,
+            'requestId': str(result.inserted_id),
+            'message': 'Request submitted successfully'
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"Create request error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/requests/popular', methods=['GET'])
+def get_popular_requests():
+    """Get popular and most viewed completed requests"""
+    try:
+        if not requests_collection:
+            return jsonify({'error': 'Database not configured'}), 503
+            
+        # Get completed requests sorted by views
+        popular = list(requests_collection.find(
+            {'status': 'completed', 'videoResult': {'$ne': None}}
+        ).sort('views', -1).limit(12))
+        
+        # Convert ObjectId to string
+        for req in popular:
+            req['_id'] = str(req['_id'])
+            if 'createdAt' in req:
+                req['createdAt'] = req['createdAt'].isoformat()
+            if 'updatedAt' in req:
+                req['updatedAt'] = req['updatedAt'].isoformat()
+        
+        return jsonify({
+            'success': True,
+            'requests': popular
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Popular requests error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/request/<request_id>/view', methods=['POST'])
+def increment_view(request_id):
+    """Increment view count for a request"""
+    try:
+        if not requests_collection:
+            return jsonify({'error': 'Database not configured'}), 503
+            
+        result = requests_collection.update_one(
+            {'_id': ObjectId(request_id)},
+            {'$inc': {'views': 1}}
+        )
+        
+        if result.modified_count > 0:
+            return jsonify({'success': True}), 200
+        else:
+            return jsonify({'error': 'Request not found'}), 404
+            
+    except Exception as e:
+        logger.error(f"Increment view error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/requests', methods=['GET'])
+def get_requests():
+    """Get all video requests"""
+    try:
+        if not requests_collection:
+            return jsonify({'error': 'Database not configured'}), 503
+            
+        status = request.args.get('status')
+        query = {}
+        if status:
+            query['status'] = status
+        
+        requests_list = list(requests_collection.find(query).sort('createdAt', -1))
+        
+        # Convert ObjectId to string and format dates
+        for req in requests_list:
+            req['_id'] = str(req['_id'])
+            if 'createdAt' in req:
+                req['createdAt'] = req['createdAt'].isoformat()
+            if 'updatedAt' in req:
+                req['updatedAt'] = req['updatedAt'].isoformat()
+        
+        return jsonify({
+            'success': True,
+            'requests': requests_list
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Get requests error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/request/<request_id>', methods=['GET'])
+def get_request(request_id):
+    """Get a specific request"""
+    try:
+        if not requests_collection:
+            return jsonify({'error': 'Database not configured'}), 503
+            
+        request_doc = requests_collection.find_one({'_id': ObjectId(request_id)})
+        
+        if not request_doc:
+            return jsonify({'error': 'Request not found'}), 404
+        
+        request_doc['_id'] = str(request_doc['_id'])
+        if 'createdAt' in request_doc:
+            request_doc['createdAt'] = request_doc['createdAt'].isoformat()
+        if 'updatedAt' in request_doc:
+            request_doc['updatedAt'] = request_doc['updatedAt'].isoformat()
+        
+        return jsonify({
+            'success': True,
+            'request': request_doc
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Get request error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/request/<request_id>/complete', methods=['POST'])
+@require_auth
+def complete_request(request_id):
+    """Admin endpoint to mark request as completed with video"""
+    try:
+        data = request.get_json()
+        video_url = data.get('videoUrl')
+        
+        if not video_url:
+            return jsonify({'error': 'Video URL is required'}), 400
+        
+        if not requests_collection:
+            return jsonify({'error': 'Database not configured'}), 503
+            
+        result = requests_collection.update_one(
+            {'_id': ObjectId(request_id)},
+            {
+                '$set': {
+                    'status': 'completed',
+                    'videoResult': video_url,
+                    'updatedAt': datetime.utcnow()
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({'error': 'Request not found or already completed'}), 404
+        
+        return jsonify({
+            'success': True,
+            'message': 'Request marked as completed'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Complete request error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    """Serve uploaded files"""
+    try:
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        if not os.path.exists(filepath):
+            return jsonify({'error': 'File not found'}), 404
+        return send_file(filepath)
+    except Exception as e:
+        logger.error(f"Serve file error: {e}")
+        return jsonify({'error': 'File not found'}), 404
+
+# --- EXISTING ROUTES ---
+
 @app.route('/', methods=['GET'])
 def index():
     return jsonify({
         "service": PRODUCT_NAME, 
         "status": "online",
-        "webapp": WEBAPP_URL
+        "webapp": WEBAPP_URL,
+        "features": ["content", "broadcast", "video_requests", "telegram_bot"]
     }), 200
 
 @app.route('/health', methods=['GET'])
@@ -901,6 +1375,8 @@ def get_stats():
             "total_content": 0,
             "total_views": 0,
             "total_broadcasts": 0,
+            "total_requests": 0,
+            "pending_requests": 0,
             "channels": {}
         }
         
@@ -920,6 +1396,10 @@ def get_stats():
         
         if broadcast_collection:
             stats["total_broadcasts"] = broadcast_collection.count_documents({})
+            
+        if requests_collection:
+            stats["total_requests"] = requests_collection.count_documents({})
+            stats["pending_requests"] = requests_collection.count_documents({"status": "pending"})
         
         return jsonify({
             "success": True,
@@ -997,4 +1477,5 @@ if __name__ == '__main__':
     
     logger.info(f"Starting server on port {PORT}")
     logger.info(f"WebApp URL: {WEBAPP_URL}")
+    logger.info(f"Video requests enabled at /api/request")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
