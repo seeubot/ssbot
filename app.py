@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- MONGODB SETUP ---
-MONGODB_URI = "mongodb+srv://room:room@room.4vris.mongodb.net/?appName=room"
+MONGODB_URI = "mongodb+srv://naya:naya@naya.fk9em5f.mongodb.net/?appName=naya"
 client = None
 db = None
 content_collection = None
