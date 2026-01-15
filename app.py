@@ -20,6 +20,7 @@ GROUP_TELEGRAM_ID = -1002541647242  # DiskWala Channel
 TELUGU_GROUP_ID = -1003551789476  # Telugu Channel
 CONTENT_FORWARD_CHANNEL_ID = -1002776780769  # Video Files Channel
 PRODUCT_NAME = "Adult-Hub"
+WEBAPP_URL = "https://drs-kappa.vercel.app/"
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -34,9 +35,10 @@ client = None
 db = None
 content_collection = None
 counter_collection = None
+broadcast_collection = None
 
 def init_mongodb():
-    global client, db, content_collection, counter_collection
+    global client, db, content_collection, counter_collection, broadcast_collection
     
     try:
         client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
@@ -48,11 +50,13 @@ def init_mongodb():
         db = client[db_name]
         content_collection = db[collection_name]
         counter_collection = db["counters"]
+        broadcast_collection = db["broadcasts"]
         
         # Create indexes
         content_collection.create_index([("created_at", -1)])
         content_collection.create_index([("tags", 1)])
         content_collection.create_index([("channel", 1)])
+        broadcast_collection.create_index([("created_at", -1)])
         
         logger.info(f"MongoDB connected: {db_name}.{collection_name}")
         return True
@@ -126,11 +130,20 @@ CORS(app)
 
 USER_STATE = {}
 
-# Updated keyboards with Telugu option
+# Available channels for broadcast
+BROADCAST_CHANNELS = {
+    'diskwala': {'id': GROUP_TELEGRAM_ID, 'name': 'DiskWala Channel'},
+    'telugu': {'id': TELUGU_GROUP_ID, 'name': 'Telugu Channel'},
+    'video_files': {'id': CONTENT_FORWARD_CHANNEL_ID, 'name': 'Video Files Channel'}
+}
+
+# Updated keyboards with WebApp and Broadcast
 MAIN_KEYBOARD = {
     'keyboard': [
         [{'text': 'DiskWala Posts'}, {'text': 'Telugu Posts'}],
-        [{'text': 'Video Files'}, {'text': 'Cancel'}]
+        [{'text': 'Video Files'}, {'text': '📢 Broadcast'}],
+        [{'text': '🌐 Open WebApp', 'web_app': {'url': WEBAPP_URL}}],
+        [{'text': 'Cancel'}]
     ],
     'resize_keyboard': True
 }
@@ -138,6 +151,15 @@ MAIN_KEYBOARD = {
 CHANNEL_MODE_KEYBOARD = {
     'keyboard': [
         [{'text': 'Single Post'}, {'text': 'Forward Multiple'}],
+        [{'text': 'Back to Menu'}]
+    ],
+    'resize_keyboard': True
+}
+
+BROADCAST_KEYBOARD = {
+    'keyboard': [
+        [{'text': '📺 DiskWala'}, {'text': '🇮🇳 Telugu'}],
+        [{'text': '🎬 Video Files'}, {'text': '📡 All Channels'}],
         [{'text': 'Back to Menu'}]
     ],
     'resize_keyboard': True
@@ -167,10 +189,12 @@ def send_telegram(method, payload):
         logger.error(f"Telegram error: {e}")
         return False
 
-def send_message(chat_id, text, keyboard=None):
+def send_message(chat_id, text, keyboard=None, parse_mode=None):
     payload = {'chat_id': chat_id, 'text': text}
     if keyboard:
         payload['reply_markup'] = json.dumps(keyboard)
+    if parse_mode:
+        payload['parse_mode'] = parse_mode
     return send_telegram('sendMessage', payload)
 
 def send_media_post(title, media_id, media_type, links, channel_id, channel_name):
@@ -185,6 +209,59 @@ def send_media_post(title, media_id, media_type, links, channel_id, channel_name
     key = 'photo' if media_type == 'photo' else 'video'
     
     return send_telegram(method, {'chat_id': channel_id, key: media_id, 'caption': caption})
+
+def broadcast_message(text, channels, media_id=None, media_type=None):
+    """Broadcast message to selected channels"""
+    results = {'success': [], 'failed': []}
+    
+    for channel_key in channels:
+        if channel_key not in BROADCAST_CHANNELS:
+            continue
+        
+        channel_info = BROADCAST_CHANNELS[channel_key]
+        channel_id = channel_info['id']
+        channel_name = channel_info['name']
+        
+        try:
+            if media_id and media_type:
+                method = 'sendPhoto' if media_type == 'photo' else 'sendVideo'
+                key = 'photo' if media_type == 'photo' else 'video'
+                result = send_telegram(method, {
+                    'chat_id': channel_id,
+                    key: media_id,
+                    'caption': text
+                })
+            else:
+                result = send_message(channel_id, text)
+            
+            if result:
+                results['success'].append(channel_name)
+                logger.info(f"Broadcast sent to {channel_name}")
+            else:
+                results['failed'].append(channel_name)
+                logger.error(f"Broadcast failed for {channel_name}")
+                
+            time.sleep(0.5)  # Rate limiting
+            
+        except Exception as e:
+            results['failed'].append(channel_name)
+            logger.error(f"Broadcast error for {channel_name}: {e}")
+    
+    return results
+
+def save_broadcast_log(admin_id, channels, message, results):
+    """Save broadcast history"""
+    try:
+        if broadcast_collection:
+            broadcast_collection.insert_one({
+                'admin_id': admin_id,
+                'channels': channels,
+                'message': message,
+                'results': results,
+                'created_at': datetime.utcnow()
+            })
+    except Exception as e:
+        logger.error(f"Broadcast log error: {e}")
 
 # --- URL VALIDATION ---
 def validate_url(url):
@@ -208,7 +285,7 @@ def save_content(data):
         doc = {
             "title": data.get('title'),
             "type": data.get('type'),
-            "channel": data.get('channel', 'diskwala'),  # Track which channel
+            "channel": data.get('channel', 'diskwala'),
             "thumbnail_url": data.get('thumbnail_url'),
             "post_type": data.get('post_type'),
             "telegram_media_id": data.get('telegram_media_id'),
@@ -261,7 +338,7 @@ def process_update(update):
         chat_id = message['chat']['id']
         
         # Ignore messages from channels
-        if chat_id in [GROUP_TELEGRAM_ID, TELUGU_GROUP_ID]:
+        if chat_id in [GROUP_TELEGRAM_ID, TELUGU_GROUP_ID, CONTENT_FORWARD_CHANNEL_ID]:
             return
         
         text = message.get('text', '').strip()
@@ -282,10 +359,99 @@ def process_update(update):
                 f"🚀 {PRODUCT_NAME} Admin Bot\n\n"
                 f"📁 DiskWala Posts - Post to DiskWala channel\n"
                 f"🇮🇳 Telugu Posts - Post to Telugu channel\n"
-                f"🎬 Video Files - Forward files to video channel\n\n"
+                f"🎬 Video Files - Forward files to video channel\n"
+                f"📢 Broadcast - Send message to channels\n"
+                f"🌐 Open WebApp - Access web interface\n\n"
                 f"Choose an option:",
                 MAIN_KEYBOARD
             )
+            return
+        
+        # --- BROADCAST ---
+        if text == '📢 Broadcast':
+            USER_STATE[chat_id] = {'step': 'broadcast_select', 'timestamp': time.time()}
+            send_message(
+                chat_id,
+                "📢 Broadcast Message\n\n"
+                "Select channel(s) to broadcast:\n\n"
+                "📺 DiskWala - DiskWala channel only\n"
+                "🇮🇳 Telugu - Telugu channel only\n"
+                "🎬 Video Files - Video Files channel only\n"
+                "📡 All Channels - Send to all channels\n\n"
+                "Choose target:",
+                BROADCAST_KEYBOARD
+            )
+            return
+        
+        # --- BROADCAST CHANNEL SELECTION ---
+        if state['step'] == 'broadcast_select':
+            channel_map = {
+                '📺 DiskWala': ['diskwala'],
+                '🇮🇳 Telugu': ['telugu'],
+                '🎬 Video Files': ['video_files'],
+                '📡 All Channels': ['diskwala', 'telugu', 'video_files']
+            }
+            
+            if text in channel_map:
+                USER_STATE[chat_id] = {
+                    'step': 'broadcast_content',
+                    'channels': channel_map[text],
+                    'timestamp': time.time()
+                }
+                
+                channel_names = [BROADCAST_CHANNELS[ch]['name'] for ch in channel_map[text]]
+                send_message(
+                    chat_id,
+                    f"✅ Selected: {', '.join(channel_names)}\n\n"
+                    f"Now send your broadcast message.\n"
+                    f"You can send:\n"
+                    f"• Text message\n"
+                    f"• Photo with caption\n"
+                    f"• Video with caption\n\n"
+                    f"Type 'Cancel' to abort."
+                )
+            return
+        
+        # --- BROADCAST CONTENT ---
+        if state['step'] == 'broadcast_content':
+            broadcast_text = text
+            media_id = None
+            media_type = None
+            
+            # Check for media
+            if 'photo' in message:
+                media_id = message['photo'][-1]['file_id']
+                media_type = 'photo'
+                broadcast_text = message.get('caption', '')
+            elif 'video' in message:
+                media_id = message['video']['file_id']
+                media_type = 'video'
+                broadcast_text = message.get('caption', '')
+            
+            if not broadcast_text and not media_id:
+                send_message(chat_id, "❌ Please send text or media with caption")
+                return
+            
+            channels = state['channels']
+            send_message(chat_id, "⏳ Broadcasting...")
+            
+            results = broadcast_message(broadcast_text, channels, media_id, media_type)
+            
+            # Save log
+            save_broadcast_log(user_id, channels, broadcast_text, results)
+            
+            # Build result message
+            result_msg = "📢 Broadcast Complete!\n\n"
+            if results['success']:
+                result_msg += f"✅ Success ({len(results['success'])}):\n"
+                result_msg += "\n".join([f"  • {ch}" for ch in results['success']])
+            
+            if results['failed']:
+                result_msg += f"\n\n❌ Failed ({len(results['failed'])}):\n"
+                result_msg += "\n".join([f"  • {ch}" for ch in results['failed']])
+            
+            send_message(chat_id, result_msg, MAIN_KEYBOARD)
+            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
             return
         
         # --- DISKWALA POSTS ---
@@ -497,7 +663,11 @@ def webhook():
 
 @app.route('/', methods=['GET'])
 def index():
-    return jsonify({"service": PRODUCT_NAME, "status": "online"}), 200
+    return jsonify({
+        "service": PRODUCT_NAME, 
+        "status": "online",
+        "webapp": WEBAPP_URL
+    }), 200
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -645,9 +815,120 @@ def get_channels():
         "success": True,
         "channels": [
             {"id": "diskwala", "name": "DiskWala", "telegram_id": GROUP_TELEGRAM_ID},
-            {"id": "telugu", "name": "Telugu", "telegram_id": TELUGU_GROUP_ID}
+            {"id": "telugu", "name": "Telugu", "telegram_id": TELUGU_GROUP_ID},
+            {"id": "video_files", "name": "Video Files", "telegram_id": CONTENT_FORWARD_CHANNEL_ID}
         ]
     }), 200
+
+@app.route('/api/broadcasts', methods=['GET'])
+@require_auth
+def get_broadcasts():
+    """Get broadcast history"""
+    if not broadcast_collection:
+        return jsonify({"error": "DB not configured"}), 503
+    
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+        limit = min(int(request.args.get('limit', 20)), 50)
+        skip = (page - 1) * limit
+        
+        total = broadcast_collection.count_documents({})
+        cursor = broadcast_collection.find({}).sort("created_at", -1).skip(skip).limit(limit)
+        
+        items = []
+        for doc in cursor:
+            doc['_id'] = str(doc['_id'])
+            if 'created_at' in doc:
+                doc['created_at'] = doc['created_at'].isoformat()
+            items.append(doc)
+        
+        return jsonify({
+            "success": True,
+            "data": items,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Broadcast history error: {e}")
+        return jsonify({"error": "Failed"}), 500
+
+@app.route('/api/broadcast', methods=['POST'])
+@require_auth
+def api_broadcast():
+    """API endpoint for broadcasting"""
+    try:
+        data = request.get_json() or {}
+        
+        message = data.get('message', '').strip()
+        channels = data.get('channels', [])
+        
+        if not message:
+            return jsonify({"error": "Message required"}), 400
+        
+        if not channels:
+            return jsonify({"error": "At least one channel required"}), 400
+        
+        # Validate channels
+        valid_channels = [ch for ch in channels if ch in BROADCAST_CHANNELS]
+        if not valid_channels:
+            return jsonify({"error": "Invalid channels"}), 400
+        
+        # Perform broadcast
+        results = broadcast_message(message, valid_channels)
+        
+        # Save log
+        save_broadcast_log(ADMIN_TELEGRAM_ID, valid_channels, message, results)
+        
+        return jsonify({
+            "success": True,
+            "results": results
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"API broadcast error: {e}")
+        return jsonify({"error": "Failed"}), 500
+
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    """Get system statistics"""
+    try:
+        stats = {
+            "total_content": 0,
+            "total_views": 0,
+            "total_broadcasts": 0,
+            "channels": {}
+        }
+        
+        if content_collection:
+            stats["total_content"] = content_collection.count_documents({})
+            
+            # Get total views
+            pipeline = [{"$group": {"_id": None, "total": {"$sum": "$views"}}}]
+            result = list(content_collection.aggregate(pipeline))
+            if result:
+                stats["total_views"] = result[0].get("total", 0)
+            
+            # Get content by channel
+            for channel_key in BROADCAST_CHANNELS.keys():
+                count = content_collection.count_documents({"channel": channel_key})
+                stats["channels"][channel_key] = count
+        
+        if broadcast_collection:
+            stats["total_broadcasts"] = broadcast_collection.count_documents({})
+        
+        return jsonify({
+            "success": True,
+            "stats": stats
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Stats error: {e}")
+        return jsonify({"error": "Failed"}), 500
 
 # --- BACKGROUND TASKS ---
 
@@ -696,7 +977,7 @@ def set_webhook():
 # --- STARTUP ---
 
 if __name__ == '__main__':
-    logger.info("Starting StreamHub...")
+    logger.info(f"Starting {PRODUCT_NAME}...")
     
     init_mongodb()
     
@@ -715,4 +996,5 @@ if __name__ == '__main__':
             logger.error("Webhook setup failed")
     
     logger.info(f"Starting server on port {PORT}")
+    logger.info(f"WebApp URL: {WEBAPP_URL}")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
