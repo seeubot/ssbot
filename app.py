@@ -160,7 +160,7 @@ ADMIN_MAIN_KEYBOARD = {
 USER_MAIN_KEYBOARD = {
     'keyboard': [
         [{'text': '📥 Request Video'}],
-        [{'text': '📊 Popular Requests'}, {'text': '🆕 My Requests'}],
+        [{'text': '🆕 My Requests'}],
         [{'text': '❌ Cancel'}]
     ],
     'resize_keyboard': True
@@ -194,7 +194,7 @@ REQUESTS_KEYBOARD = {
 REQUEST_MEDIA_KEYBOARD = {
     'keyboard': [
         [{'text': '📷 Send Photo'}, {'text': '🎥 Send Video'}],
-        [{'text': '✏️ Text Only'}, {'text': '❌ Cancel'}]
+        [{'text': '❌ Cancel'}]
     ],
     'resize_keyboard': True
 }
@@ -271,15 +271,15 @@ def send_direct_message(chat_id, text, reply_markup=None):
 
 # --- VIDEO REQUEST FUNCTIONS ---
 
-def create_video_request(user_id, description, media_url=None, media_type=None, message_id=None):
-    """Create a new video request from user"""
+def create_video_request(user_id, media_url=None, media_type=None, message_id=None):
+    """Create a new video request from user - NO DESCRIPTION NEEDED"""
     try:
         request_id = get_next_sequence('video_request_id')
         
         request_doc = {
             'request_id': f"REQ{request_id:06d}",
             'user_id': user_id,
-            'description': description,
+            'description': 'Image/Video Request',  # Default description
             'mediaUrl': media_url,
             'mediaType': media_type,
             'telegram_message_id': message_id,
@@ -290,7 +290,7 @@ def create_video_request(user_id, description, media_url=None, media_type=None, 
             'updatedAt': datetime.utcnow()
         }
         
-        if not requests_collection:
+        if requests_collection is None:
             return None
             
         result = requests_collection.insert_one(request_doc)
@@ -310,13 +310,13 @@ def notify_admin_new_request(request_doc):
     try:
         user_id = request_doc['user_id']
         request_id = request_doc['request_id']
-        description = request_doc.get('description', 'No description')
+        media_type = request_doc.get('mediaType', 'Unknown')
         
         message = f"""
 🆕 New Video Request
 
-📝 Description: {description}
 🆔 Request ID: {request_id}
+📸 Media Type: {media_type}
 👤 User ID: {user_id}
 📅 Date: {request_doc['createdAt'].strftime('%Y-%m-%d %H:%M')}
 
@@ -330,7 +330,7 @@ Or /complete {request_id} <video_url> to complete
         # If there's a media message, forward it
         if request_doc.get('telegram_message_id'):
             forward_message_to_admin({
-                'chat_id': request_doc.get('user_id'),
+                'chat_id': user_id,
                 'message_id': request_doc['telegram_message_id']
             }, caption=f"Request #{request_id}")
             
@@ -340,15 +340,15 @@ Or /complete {request_id} <video_url> to complete
 def handle_user_request(chat_id, user_id):
     """Handle user's video request initiation"""
     USER_STATE[chat_id] = {
-        'step': 'request_description',
+        'step': 'request_media',
         'user_id': user_id,
         'timestamp': time.time()
     }
     send_message(
         chat_id,
         "📥 Video Request\n\n"
-        "Please describe the video you're looking for:\n"
-        "(You can include details like actress name, scene description, etc.)\n\n"
+        "Please send a photo or video clip of what you're looking for.\n"
+        "No description needed - just send the media directly.\n\n"
         "Type 'Cancel' to abort.",
         REQUEST_MEDIA_KEYBOARD
     )
@@ -357,7 +357,7 @@ def handle_request_media(chat_id, user_id, text):
     """Handle request media type selection"""
     if text == '📷 Send Photo':
         USER_STATE[chat_id] = {
-            'step': 'request_photo',
+            'step': 'waiting_photo',
             'user_id': user_id,
             'timestamp': time.time()
         }
@@ -365,19 +365,11 @@ def handle_request_media(chat_id, user_id, text):
         
     elif text == '🎥 Send Video':
         USER_STATE[chat_id] = {
-            'step': 'request_video',
+            'step': 'waiting_video',
             'user_id': user_id,
             'timestamp': time.time()
         }
         send_message(chat_id, "Please send a video clip of what you're looking for:")
-        
-    elif text == '✏️ Text Only':
-        USER_STATE[chat_id] = {
-            'step': 'request_description_text',
-            'user_id': user_id,
-            'timestamp': time.time()
-        }
-        send_message(chat_id, "Please describe what you're looking for:")
 
 def handle_reply_command(chat_id, text):
     """Handle /reply command to send video directly to user"""
@@ -411,7 +403,7 @@ Thank you for using our service!
         send_direct_message(user_id, user_message)
         
         # Update request status
-        requests_collection.update_one(
+        result = requests_collection.update_one(
             {'request_id': request_id},
             {
                 '$set': {
@@ -422,7 +414,10 @@ Thank you for using our service!
             }
         )
         
-        send_message(chat_id, f"✅ Video sent to user for request {request_id}")
+        if result.modified_count > 0:
+            send_message(chat_id, f"✅ Video sent to user for request {request_id}")
+        else:
+            send_message(chat_id, f"⚠️ Request {request_id} update failed")
             
     except Exception as e:
         send_message(chat_id, f"Error: {str(e)}")
@@ -471,7 +466,7 @@ def handle_requests_command(chat_id):
         for req in pending:
             message += f"🆔 {req['request_id']}\n"
             message += f"👤 User: {req['user_id']}\n"
-            message += f"📝 {req.get('description', 'No description')[:50]}\n"
+            message += f"📸 Type: {req.get('mediaType', 'Unknown')}\n"
             message += f"📅 {req['createdAt'].strftime('%Y-%m-%d %H:%M')}\n\n"
         
         send_message(chat_id, message)
@@ -492,33 +487,10 @@ def handle_user_requests_command(chat_id, user_id):
         for req in user_requests:
             status_emoji = "✅" if req['status'] == 'completed' else "⏳"
             message += f"{status_emoji} {req['request_id']} - {req['status']}\n"
-            message += f"📝 {req.get('description', 'No description')[:40]}...\n"
+            message += f"📸 Type: {req.get('mediaType', 'Unknown')}\n"
             if req['status'] == 'completed' and req.get('videoResult'):
                 message += f"🔗 {req['videoResult']}\n"
             message += "\n"
-        
-        send_message(chat_id, message)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
-def handle_popular_requests_command(chat_id):
-    """Show popular completed requests"""
-    try:
-        popular = list(requests_collection.find(
-            {'status': 'completed', 'videoResult': {'$ne': None}}
-        ).sort('views', -1).limit(10))
-        
-        if not popular:
-            send_message(chat_id, "No completed requests yet.")
-            return
-        
-        message = "🔥 Popular Requests:\n\n"
-        for req in popular:
-            message += f"🆔 {req['request_id']}\n"
-            message += f"📝 {req.get('description', 'No description')[:50]}\n"
-            message += f"👁️ {req.get('views', 0)} views\n"
-            message += f"🔗 {req.get('videoResult', 'No link')}\n\n"
         
         send_message(chat_id, message)
         
@@ -538,7 +510,7 @@ def validate_url(url):
 # --- CONTENT MANAGEMENT ---
 
 def save_content(data):
-    if not content_collection:
+    if content_collection is None:
         return False
     
     try:
@@ -632,8 +604,7 @@ def process_update(update):
                     chat_id,
                     f"👋 Welcome to {PRODUCT_NAME}!\n\n"
                     f"Here you can:\n"
-                    f"📥 Request Video - Request specific videos\n"
-                    f"📊 Popular Requests - View popular fulfilled requests\n"
+                    f"📥 Request Video - Request specific videos by sending photo/video\n"
                     f"🆕 My Requests - Check your request status\n\n"
                     f"Choose an option:",
                     USER_MAIN_KEYBOARD
@@ -686,8 +657,70 @@ def process_update(update):
                 handle_stats_command(chat_id)
                 return
             
-            # Rest of admin flow remains same...
-            # [Previous admin flow code here - shortened for brevity]
+            # Admin posting flow (simplified - same as before)
+            elif text == 'DiskWala Posts':
+                USER_STATE[chat_id] = {
+                    'step': 'channel_mode',
+                    'channel_type': 'diskwala',
+                    'channel_id': GROUP_TELEGRAM_ID,
+                    'channel_name': 'DiskWala',
+                    'timestamp': time.time()
+                }
+                send_message(
+                    chat_id,
+                    "📁 DiskWala Posts\n\n"
+                    "✏️ Single Post - Create one post\n"
+                    "📨 Forward Multiple - Forward directly\n\n"
+                    "Choose method:",
+                    CHANNEL_MODE_KEYBOARD
+                )
+                return
+                
+            elif text == 'Telugu Posts':
+                USER_STATE[chat_id] = {
+                    'step': 'channel_mode',
+                    'channel_type': 'telugu',
+                    'channel_id': TELUGU_GROUP_ID,
+                    'channel_name': 'Telugu',
+                    'timestamp': time.time()
+                }
+                send_message(
+                    chat_id,
+                    "🇮🇳 Telugu Posts\n\n"
+                    "✏️ Single Post - Create one post\n"
+                    "📨 Forward Multiple - Forward directly\n\n"
+                    "Choose method:",
+                    CHANNEL_MODE_KEYBOARD
+                )
+                return
+                
+            elif text == 'Video Files':
+                USER_STATE[chat_id] = {'step': 'video_files', 'timestamp': time.time()}
+                send_message(
+                    chat_id,
+                    "🎬 Video Files Mode\n\n"
+                    "Send files one by one.\n"
+                    "Type 'Cancel' when done."
+                )
+                return
+                
+            elif text == '📢 Broadcast':
+                USER_STATE[chat_id] = {'step': 'broadcast_select', 'timestamp': time.time()}
+                send_message(
+                    chat_id,
+                    "📢 Broadcast Message\n\n"
+                    "Select channel(s) to broadcast:\n\n"
+                    "📺 DiskWala - DiskWala channel only\n"
+                    "🇮🇳 Telugu - Telugu channel only\n"
+                    "🎬 Video Files - Video Files channel only\n"
+                    "📡 All Channels - Send to all channels\n\n"
+                    "Choose target:",
+                    BROADCAST_KEYBOARD
+                )
+                return
+                
+            # Admin posting flow continues...
+            # [Rest of admin flow remains the same]
             
         # --- USER FLOW ---
         else:
@@ -698,32 +731,38 @@ def process_update(update):
                 handle_user_request(chat_id, user_id)
                 return
             
-            elif text == '📊 Popular Requests':
-                handle_popular_requests_command(chat_id)
-                return
-            
             elif text == '🆕 My Requests':
                 handle_user_requests_command(chat_id, user_id)
                 return
             
-            # User request flow
-            elif state['step'] == 'request_description':
-                if text in ['📷 Send Photo', '🎥 Send Video', '✏️ Text Only']:
+            # User request media selection
+            elif state['step'] == 'request_media':
+                if text in ['📷 Send Photo', '🎥 Send Video']:
                     handle_request_media(chat_id, user_id, text)
                 else:
                     send_message(chat_id, "Please select an option:", REQUEST_MEDIA_KEYBOARD)
                 return
             
-            elif state['step'] in ['request_photo', 'request_video', 'request_description_text']:
-                handle_user_request_submission(chat_id, user_id, state, message)
+            # Handle user sending media directly
+            elif state['step'] in ['waiting_photo', 'waiting_video']:
+                # Check if user sent appropriate media
+                if state['step'] == 'waiting_photo' and 'photo' not in message:
+                    send_message(chat_id, "Please send a photo or select 'Cancel'")
+                    return
+                
+                if state['step'] == 'waiting_video' and 'video' not in message:
+                    send_message(chat_id, "Please send a video or select 'Cancel'")
+                    return
+                
+                # Process the media submission
+                process_user_media_request(chat_id, user_id, message, state['step'])
                 return
             
-            # Handle user sending media directly
-            elif 'photo' in message or 'video' in message:
-                # User sent media without going through menu
-                if chat_id not in USER_STATE:
-                    send_message(chat_id, "Please use 'Request Video' button first.")
-                    return
+            # Handle user sending media without going through menu
+            elif ('photo' in message or 'video' in message) and 'step' not in state:
+                # User sent media directly, treat as request
+                process_user_media_request(chat_id, user_id, message)
+                return
             
             # Unknown command for user
             else:
@@ -733,45 +772,18 @@ def process_update(update):
         logger.error(f"Process error: {e}", exc_info=True)
         try:
             if chat_id:
-                send_message(chat_id, "🚨 Error occurred. Please try again.", USER_MAIN_KEYBOARD)
+                if is_admin(chat_id):
+                    send_message(chat_id, "🚨 Error occurred. Please try again.", ADMIN_MAIN_KEYBOARD)
+                else:
+                    send_message(chat_id, "🚨 Error occurred. Please try again.", USER_MAIN_KEYBOARD)
         except:
             pass
 
-def handle_user_request_submission(chat_id, user_id, state, message):
-    """Handle user's request submission"""
-    step = state['step']
-    
-    if step == 'request_photo' and 'photo' not in message:
-        send_message(chat_id, "Please send a photo or type 'Cancel'")
-        return
-    
-    if step == 'request_video' and 'video' not in message:
-        send_message(chat_id, "Please send a video or type 'Cancel'")
-        return
-    
-    if step == 'request_description_text' and not message.get('text'):
-        send_message(chat_id, "Please describe what you're looking for or type 'Cancel'")
-        return
-    
-    # Get description from text or caption
-    description = ""
-    if step == 'request_description_text':
-        description = message.get('text', '')
-    else:
-        description = message.get('caption', '')
-        if not description:
-            USER_STATE[chat_id] = {
-                'step': 'request_description_followup',
-                'user_id': user_id,
-                'media_message': message,
-                'timestamp': time.time()
-            }
-            send_message(chat_id, "Please describe what you're looking for in this media:")
-            return
-    
-    # Create request
+def process_user_media_request(chat_id, user_id, message, step=None):
+    """Process user's media request"""
     media_url = None
     media_type = None
+    media_id = None
     
     if 'photo' in message:
         media_id = message['photo'][-1]['file_id']
@@ -781,10 +793,13 @@ def handle_user_request_submission(chat_id, user_id, state, message):
         media_id = message['video']['file_id']
         media_type = 'video'
         media_url = f"telegram_file:{media_id}"
+    else:
+        send_message(chat_id, "❌ Please send a photo or video")
+        return
     
+    # Create request
     request_doc = create_video_request(
         user_id=user_id,
-        description=description,
         media_url=media_url,
         media_type=media_type,
         message_id=message.get('message_id')
@@ -795,7 +810,7 @@ def handle_user_request_submission(chat_id, user_id, state, message):
             chat_id,
             f"✅ Request Submitted!\n\n"
             f"🆔 Request ID: {request_doc['request_id']}\n"
-            f"📝 Description: {description[:100]}...\n\n"
+            f"📸 Media Type: {media_type}\n\n"
             f"We'll notify you when it's fulfilled!",
             USER_MAIN_KEYBOARD
         )
@@ -815,13 +830,13 @@ def handle_stats_command(chat_id):
             "channels": {}
         }
         
-        if content_collection:
+        if content_collection is not None:
             stats["total_content"] = content_collection.count_documents({})
             for channel in BROADCAST_CHANNELS:
                 count = content_collection.count_documents({"channel": channel})
                 stats["channels"][channel] = count
         
-        if requests_collection:
+        if requests_collection is not None:
             stats["total_requests"] = requests_collection.count_documents({})
             stats["pending_requests"] = requests_collection.count_documents({"status": "pending"})
             stats["completed_requests"] = requests_collection.count_documents({"status": "completed"})
@@ -859,46 +874,19 @@ def webhook():
         logger.error(f"Webhook error: {e}")
         return jsonify({"status": "error"}), 500
 
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        "service": PRODUCT_NAME, 
+        "status": "online",
+        "bot": f"@{BOT_USERNAME}" if BOT_USERNAME else "Not set",
+        "features": ["telegram_bot", "video_requests", "multi_channel"]
+    }), 200
+
 @app.route('/health', methods=['GET'])
 def health():
     status = {"status": "healthy", "service": PRODUCT_NAME}
     return jsonify(status), 200
-
-@app.route('/api/track-view', methods=['POST'])
-def api_track_view():
-    try:
-        data = request.get_json() or {}
-        content_id = data.get('content_id')
-        
-        if not content_id:
-            return jsonify({"error": "ID required"}), 400
-        
-        track_view(content_id)
-        return jsonify({"success": True}), 200
-    except Exception as e:
-        logger.error(f"Track error: {e}")
-        return jsonify({"error": "Failed"}), 500
-
-@app.route('/api/request/<request_id>/view', methods=['POST'])
-def increment_view(request_id):
-    """Increment view count for a request"""
-    try:
-        if not requests_collection:
-            return jsonify({'error': 'Database not configured'}), 503
-            
-        result = requests_collection.update_one(
-            {'request_id': request_id},
-            {'$inc': {'views': 1}}
-        )
-        
-        if result.modified_count > 0:
-            return jsonify({'success': True}), 200
-        else:
-            return jsonify({'error': 'Request not found'}), 404
-            
-    except Exception as e:
-        logger.error(f"Increment view error: {e}")
-        return jsonify({'error': str(e)}), 500
 
 # --- BACKGROUND TASKS ---
 
@@ -906,18 +894,18 @@ def flush_views_once():
     """Flush all pending views to DB"""
     try:
         with view_lock:
-            if not view_cache or not content_collection:
+            if not view_cache or content_collection is None:
                 return
             
             from pymongo import UpdateOne
             
-            bulk_ops = [
-                UpdateOne(
-                    {"_id": ObjectId(cid)},
-                    {"$inc": {"views": count}}
-                ) for cid, count in view_cache.items()
-                if count > 0 and ObjectId.is_valid(cid)
-            ]
+            bulk_ops = []
+            for cid, count in view_cache.items():
+                if count > 0 and ObjectId.is_valid(cid):
+                    bulk_ops.append(UpdateOne(
+                        {"_id": ObjectId(cid)},
+                        {"$inc": {"views": count}}
+                    ))
             
             if bulk_ops:
                 content_collection.bulk_write(bulk_ops, ordered=False)
