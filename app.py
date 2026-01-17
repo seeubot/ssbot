@@ -22,6 +22,13 @@ TELUGU_GROUP_ID = -1003551789476  # Telugu Channel
 CONTENT_FORWARD_CHANNEL_ID = -1002776780769  # Video Files Channel
 PRODUCT_NAME = "Adult-Hub"
 
+# List of restricted channels (block forwarding to/from these)
+RESTRICTED_CHANNELS = [
+    GROUP_TELEGRAM_ID,    # DiskWala Channel
+    TELUGU_GROUP_ID,      # Telugu Channel
+    CONTENT_FORWARD_CHANNEL_ID  # Video Files Channel
+]
+
 # --- LOGGING SETUP ---
 logging.basicConfig(
     level=logging.INFO,
@@ -226,28 +233,44 @@ def send_message(chat_id, text, keyboard=None, parse_mode=None, disable_web_page
     return send_telegram('sendMessage', payload)
 
 def send_media_post(title, media_id, media_type, links, channel_id, channel_name, post_number=None):
-    """Send media post to specified channel with post number and default format"""
+    """Send media post to specified channel with post number and REQUEST BUTTON"""
     if not TELEGRAM_API:
         return False
 
-    # Get bot info for request URL
-    bot_url = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "Contact Admin"
-    
     # Default format as requested
     link_text = "📥 Download Links/👀 Watch Online\n\n"
     link_text += "Open in Diskwala App 👇\n"
     link_text += "\n".join([f"{link['url']}" for link in links])
     
-    # Add post number and request button
+    # Add post number
     post_number_text = f"#{post_number} " if post_number else ""
-    request_button = f"\n\n📥 Request Video: {bot_url}?start=request"
     
-    caption = f"{post_number_text}🔥 {title} 🔥\n\n{link_text}{request_button}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
+    caption = f"{post_number_text}🔥 {title} 🔥\n\n{link_text}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
+    
+    # Create inline keyboard with Request Video button
+    request_keyboard = {
+        'inline_keyboard': [[
+            {
+                'text': '📥 Request Video',
+                'url': f'https://t.me/{BOT_USERNAME}?start=request' if BOT_USERNAME else 'https://t.me/bot'
+            }
+        ]]
+    }
     
     method = 'sendPhoto' if media_type == 'photo' else 'sendVideo'
     key = 'photo' if media_type == 'photo' else 'video'
     
-    return send_telegram(method, {'chat_id': channel_id, key: media_id, 'caption': caption})
+    return send_telegram(method, {
+        'chat_id': channel_id, 
+        key: media_id, 
+        'caption': caption,
+        'reply_markup': json.dumps(request_keyboard),
+        'parse_mode': 'HTML'  # Using HTML to prevent formatting issues
+    })
+
+def is_restricted_channel(chat_id):
+    """Check if chat_id is in restricted channels list"""
+    return chat_id in RESTRICTED_CHANNELS
 
 def forward_media_to_user(user_id, media_id, media_type, caption=None):
     """Forward media file from bot to user"""
@@ -643,6 +666,30 @@ def cleanup_old_states():
         except Exception as e:
             logger.error(f"State cleanup error: {e}")
 
+# --- FORWARDING RESTRICTION ---
+def check_forwarding_restriction(message):
+    """Check if forwarding is allowed from/to restricted channels"""
+    # Check if message is being forwarded from a restricted channel
+    if 'forward_from_chat' in message:
+        forward_chat_id = message['forward_from_chat']['id']
+        if forward_chat_id in RESTRICTED_CHANNELS:
+            return False, f"❌ Forwarding from {get_channel_name(forward_chat_id)} is not allowed"
+    
+    # Check if message is being forwarded to a restricted channel
+    if 'chat' in message:
+        chat_id = message['chat']['id']
+        if chat_id in RESTRICTED_CHANNELS:
+            return False, f"❌ Forwarding to {get_channel_name(chat_id)} is not allowed"
+    
+    return True, ""
+
+def get_channel_name(channel_id):
+    """Get channel name from ID"""
+    for channel_key, info in BROADCAST_CHANNELS.items():
+        if info['id'] == channel_id:
+            return info['name']
+    return "Unknown Channel"
+
 # --- TELEGRAM UPDATE HANDLER ---
 
 def process_update(update):
@@ -654,6 +701,14 @@ def process_update(update):
         chat_id = message['chat']['id']
         text = message.get('text', '').strip()
         user_id = message['from']['id']
+        
+        # Check forwarding restriction for all messages
+        allowed, error_msg = check_forwarding_restriction(message)
+        if not allowed:
+            # Only send error to admins or if trying to forward to bot
+            if is_admin(user_id) or chat_id == user_id:
+                send_message(chat_id, error_msg)
+            return
         
         # Check if user is admin
         admin = is_admin(user_id)
@@ -895,7 +950,7 @@ def process_update(update):
                 # Get post number before posting
                 post_number = get_next_post_number(channel_type)
                 
-                # Send post with default format
+                # Send post with REQUEST BUTTON (not link)
                 result = send_media_post(title, media_id, media_type, links, channel_id, channel_name, post_number)
                 
                 if result:
@@ -916,8 +971,9 @@ def process_update(update):
                     
                     msg = f"🎉 Success!\n✅ Posted to {channel_name} channel\n"
                     msg += f"📊 Post #{post_number}\n"
+                    msg += f"📝 With Request Video Button\n"
                     if content_id:
-                        msg += f"📝 Content ID: {content_id}"
+                        msg += f"📋 Content ID: {content_id}"
                     send_message(chat_id, msg, ADMIN_MAIN_KEYBOARD)
                 else:
                     send_message(chat_id, f"❌ Failed to post to {channel_name}", ADMIN_MAIN_KEYBOARD)
@@ -928,6 +984,12 @@ def process_update(update):
             # --- FORWARD MULTIPLE ---
             elif state['step'] == 'channel_forward':
                 if 'forward_from' in message or 'forward_from_chat' in message:
+                    # Check forwarding restriction
+                    allowed, error_msg = check_forwarding_restriction(message)
+                    if not allowed:
+                        send_message(chat_id, error_msg)
+                        return
+                    
                     channel_id = state.get('channel_id', GROUP_TELEGRAM_ID)
                     channel_name = state.get('channel_name', 'Channel')
                     
@@ -1277,7 +1339,7 @@ def index():
         "service": PRODUCT_NAME, 
         "status": "online",
         "bot": f"@{BOT_USERNAME}" if BOT_USERNAME else "Not set",
-        "features": ["telegram_bot", "video_requests", "multi_channel", "media_forwarding"]
+        "features": ["telegram_bot", "video_requests", "multi_channel", "media_forwarding", "forwarding_restrictions"]
     }), 200
 
 @app.route('/health', methods=['GET'])
@@ -1365,4 +1427,5 @@ if __name__ == '__main__':
     
     logger.info(f"Starting server on port {PORT}")
     logger.info(f"Bot username: @{BOT_USERNAME if BOT_USERNAME else 'Not set'}")
+    logger.info(f"Restricted channels: {RESTRICTED_CHANNELS}")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
