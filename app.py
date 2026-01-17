@@ -226,16 +226,19 @@ def send_message(chat_id, text, keyboard=None, parse_mode=None, disable_web_page
     return send_telegram('sendMessage', payload)
 
 def send_media_post(title, media_id, media_type, links, channel_id, channel_name, post_number=None):
-    """Send media post to specified channel with post number"""
+    """Send media post to specified channel with post number and default format"""
     if not TELEGRAM_API:
         return False
 
     # Get bot info for request URL
     bot_url = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "Contact Admin"
     
-    link_text = "\n".join([f"🔗 {link.get('episode_title', 'Link')}: {link['url']}" for link in links])
+    # Default format as requested
+    link_text = "📥 Download Links/👀 Watch Online\n\n"
+    link_text += "Open in Diskwala App 👇\n"
+    link_text += "\n".join([f"{link['url']}" for link in links])
     
-    # Add post number to caption if available
+    # Add post number and request button
     post_number_text = f"#{post_number} " if post_number else ""
     request_button = f"\n\n📥 Request Video: {bot_url}?start=request"
     
@@ -741,7 +744,7 @@ def process_update(update):
                 handle_stats_command(chat_id)
                 return
             
-            # Admin posting flow
+            # Admin posting flow - FIXED
             elif text == 'DiskWala Posts':
                 USER_STATE[chat_id] = {
                     'step': 'channel_mode',
@@ -802,9 +805,253 @@ def process_update(update):
                     BROADCAST_KEYBOARD
                 )
                 return
+            
+            # --- CHANNEL MODE SELECTION ---
+            state = USER_STATE.get(chat_id, {'step': 'main', 'timestamp': time.time()})
+            
+            if state['step'] == 'channel_mode':
+                channel_name = state.get('channel_name', 'Channel')
                 
-            # Admin posting flow continues...
-            # [Rest of admin flow remains the same]
+                if text == 'Single Post':
+                    USER_STATE[chat_id]['step'] = 'channel_media'
+                    USER_STATE[chat_id]['data'] = {}
+                    USER_STATE[chat_id]['timestamp'] = time.time()
+                    send_message(chat_id, f"📤 {channel_name} - Step 1/2: Send thumbnail (photo/video)")
+                    return
+                
+                elif text == 'Forward Multiple':
+                    USER_STATE[chat_id]['step'] = 'channel_forward'
+                    USER_STATE[chat_id]['timestamp'] = time.time()
+                    send_message(
+                        chat_id,
+                        f"📨 Forward messages to {channel_name} channel.\n\n"
+                        "Forward messages to me and I'll send them to the channel.\n\n"
+                        "Type 'Cancel' when done."
+                    )
+                    return
+            
+            # --- SINGLE POST FLOW (SIMPLIFIED) ---
+            elif state['step'] == 'channel_media':
+                media_id = None
+                media_type = None
+                
+                if 'video' in message:
+                    media_id = message['video']['file_id']
+                    media_type = 'video'
+                elif 'photo' in message:
+                    media_id = message['photo'][-1]['file_id']
+                    media_type = 'photo'
+                
+                if media_id:
+                    # Set default title
+                    default_title = "Hot Scene 🔥"
+                    USER_STATE[chat_id]['data'] = {
+                        'telegram_media_id': media_id, 
+                        'media_type': media_type,
+                        'title': default_title  # Auto-set default title
+                    }
+                    USER_STATE[chat_id]['step'] = 'channel_urls'  # Skip title step
+                    USER_STATE[chat_id]['timestamp'] = time.time()
+                    
+                    # Show media info and ask for URLs
+                    send_message(
+                        chat_id,
+                        f"✅ {media_type.title()} saved!\n"
+                        f"📝 Title: {default_title} (Default)\n\n"
+                        f"Step 2/2: Send download/watch URLs (one per line)"
+                    )
+                else:
+                    send_message(chat_id, "❌ Send photo or video")
+                return
+            
+            # --- URL ENTRY (SIMPLIFIED) ---
+            elif state['step'] == 'channel_urls':
+                # Process URLs
+                urls = []
+                if text:
+                    # Split by newlines or commas
+                    for url in text.replace(',', '\n').split('\n'):
+                        url = url.strip()
+                        if url and validate_url(url):
+                            urls.append(url)
+                
+                if not urls:
+                    send_message(chat_id, "❌ Send valid URLs (http:// or https://)")
+                    return
+                
+                # Get data from state
+                title = state['data']['title']
+                media_id = state['data']['telegram_media_id']
+                media_type = state['data']['media_type']
+                channel_id = state.get('channel_id', GROUP_TELEGRAM_ID)
+                channel_name = state.get('channel_name', 'Channel')
+                channel_type = state.get('channel_type', 'diskwala')
+                
+                # Create links
+                links = [{"url": url, "episode_title": "Watch Now"} for url in urls]
+                
+                send_message(chat_id, f"⏳ Posting to {channel_name}...")
+                
+                # Get post number before posting
+                post_number = get_next_post_number(channel_type)
+                
+                # Send post with default format
+                result = send_media_post(title, media_id, media_type, links, channel_id, channel_name, post_number)
+                
+                if result:
+                    content_id = save_content({
+                        "title": title,
+                        "type": "video",
+                        "channel": channel_type,
+                        "thumbnail_url": f"telegram_file_id:{media_id}",
+                        "post_type": f"{channel_type}_{media_type}",
+                        "telegram_media_id": media_id,
+                        "telegram_message_id": result.get('message_id') if isinstance(result, dict) else None,
+                        "telegram_chat_id": channel_id,
+                        "diskwala_url": urls[0] if urls else "",
+                        "tags": title.lower().split(),
+                        "links": links,
+                        "post_number": post_number
+                    })
+                    
+                    msg = f"🎉 Success!\n✅ Posted to {channel_name} channel\n"
+                    msg += f"📊 Post #{post_number}\n"
+                    if content_id:
+                        msg += f"📝 Content ID: {content_id}"
+                    send_message(chat_id, msg, ADMIN_MAIN_KEYBOARD)
+                else:
+                    send_message(chat_id, f"❌ Failed to post to {channel_name}", ADMIN_MAIN_KEYBOARD)
+                
+                USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+                return
+            
+            # --- FORWARD MULTIPLE ---
+            elif state['step'] == 'channel_forward':
+                if 'forward_from' in message or 'forward_from_chat' in message:
+                    channel_id = state.get('channel_id', GROUP_TELEGRAM_ID)
+                    channel_name = state.get('channel_name', 'Channel')
+                    
+                    result = send_telegram('copyMessage', {
+                        'chat_id': channel_id,
+                        'from_chat_id': chat_id,
+                        'message_id': message['message_id'],
+                    })
+                    
+                    send_message(chat_id, f"✅ Forwarded to {channel_name}" if result else "❌ Failed")
+                else:
+                    send_message(chat_id, "⚠️ Forward messages from other chats")
+                return
+            
+            # --- VIDEO FILES ---
+            elif state['step'] == 'video_files':
+                if 'photo' in message or 'video' in message or 'document' in message:
+                    file_num = get_next_sequence('video_files_counter')
+                    caption = f"📁 File #{file_num}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
+                    
+                    result = send_telegram('copyMessage', {
+                        'chat_id': CONTENT_FORWARD_CHANNEL_ID,
+                        'from_chat_id': chat_id,
+                        'message_id': message['message_id'],
+                        'caption': caption
+                    })
+                    
+                    send_message(chat_id, f"✅ File #{file_num} forwarded" if result else "❌ Failed")
+                else:
+                    send_message(chat_id, "⚠️ Send photo/video/document")
+                return
+            
+            # --- BROADCAST FLOW ---
+            elif state['step'] == 'broadcast_select':
+                channel_map = {
+                    '📺 DiskWala': ['diskwala'],
+                    '🇮🇳 Telugu': ['telugu'],
+                    '🎬 Video Files': ['video_files'],
+                    '📡 All Channels': ['diskwala', 'telugu', 'video_files']
+                }
+                
+                if text in channel_map:
+                    USER_STATE[chat_id] = {
+                        'step': 'broadcast_content',
+                        'channels': channel_map[text],
+                        'timestamp': time.time()
+                    }
+                    
+                    channel_names = [BROADCAST_CHANNELS[ch]['name'] for ch in channel_map[text]]
+                    send_message(
+                        chat_id,
+                        f"✅ Selected: {', '.join(channel_names)}\n\n"
+                        f"Now send your broadcast message.\n"
+                        f"You can send:\n"
+                        f"• Text message\n"
+                        f"• Photo with caption\n"
+                        f"• Video with caption\n\n"
+                        f"Type 'Cancel' to abort."
+                    )
+                return
+            
+            elif state['step'] == 'broadcast_content':
+                broadcast_text = text
+                media_id = None
+                media_type = None
+                
+                # Check for media
+                if 'photo' in message:
+                    media_id = message['photo'][-1]['file_id']
+                    media_type = 'photo'
+                    broadcast_text = message.get('caption', '')
+                elif 'video' in message:
+                    media_id = message['video']['file_id']
+                    media_type = 'video'
+                    broadcast_text = message.get('caption', '')
+                
+                if not broadcast_text and not media_id:
+                    send_message(chat_id, "❌ Please send text or media with caption")
+                    return
+                
+                # Broadcast function (simplified)
+                channels = state['channels']
+                send_message(chat_id, "⏳ Broadcasting...")
+                
+                # Simple broadcast implementation
+                results = {'success': [], 'failed': []}
+                for channel_key in channels:
+                    if channel_key in BROADCAST_CHANNELS:
+                        channel_info = BROADCAST_CHANNELS[channel_key]
+                        channel_id = channel_info['id']
+                        
+                        try:
+                            if media_id and media_type:
+                                method = 'sendPhoto' if media_type == 'photo' else 'sendVideo'
+                                key = 'photo' if media_type == 'photo' else 'video'
+                                result = send_telegram(method, {
+                                    'chat_id': channel_id,
+                                    key: media_id,
+                                    'caption': broadcast_text
+                                })
+                            else:
+                                result = send_message(channel_id, broadcast_text)
+                            
+                            if result:
+                                results['success'].append(channel_info['name'])
+                            else:
+                                results['failed'].append(channel_info['name'])
+                                
+                        except Exception as e:
+                            results['failed'].append(channel_info['name'])
+                
+                # Build result message
+                result_msg = "📢 Broadcast Complete!\n\n"
+                if results['success']:
+                    result_msg += f"✅ Success ({len(results['success'])}):\n"
+                    result_msg += "\n".join([f"  • {ch}" for ch in results['success']])
+                
+                if results['failed']:
+                    result_msg += f"\n\n❌ Failed ({len(results['failed'])}):\n"
+                    result_msg += "\n".join([f"  • {ch}" for ch in results['failed']])
+                
+                send_message(chat_id, result_msg, ADMIN_MAIN_KEYBOARD)
+                USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+                return
             
         # --- USER FLOW ---
         else:
