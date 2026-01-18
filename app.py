@@ -1,7 +1,7 @@
 import os
 import json
 import requests
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 from flask_cors import CORS 
 from pymongo import MongoClient
 from bson import ObjectId
@@ -9,11 +9,10 @@ from datetime import datetime, timedelta
 import logging
 import threading
 from cachetools import TTLCache
-from functools import wraps
 import time
 import atexit
 import signal
-from werkzeug.utils import secure_filename
+from urllib.parse import urlparse
 
 # --- CONSTANTS & CONFIGURATION ---
 ADMIN_TELEGRAM_ID = 1352497419
@@ -37,46 +36,32 @@ db = None
 content_collection = None
 counter_collection = None
 broadcast_collection = None
-requests_collection = None  # For video requests
-post_counter_collection = None  # For post numbering
-users_collection = None  # For user subscriptions
-plans_collection = None  # For subscription plans
+requests_collection = None
+post_counter_collection = None
+users_collection = None
+plans_collection = None
 
 def init_mongodb():
-    global client, db, content_collection, counter_collection, broadcast_collection, requests_collection, post_counter_collection, users_collection, plans_collection
+    global client, db, content_collection, counter_collection, broadcast_collection
+    global requests_collection, post_counter_collection, users_collection, plans_collection
     
     try:
         client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
         client.admin.command('ping')
         
-        db_name = os.environ.get("DB_NAME", "streamhub")
-        collection_name = os.environ.get("COLLECTION_NAME", "diskwala_posts")
+        db_name = "streamhub"
+        collection_name = "diskwala_posts"
         
         db = client[db_name]
         content_collection = db[collection_name]
         counter_collection = db["counters"]
         broadcast_collection = db["broadcasts"]
         requests_collection = db["video_requests"]
-        post_counter_collection = db["post_counters"]  # For channel post numbering
-        users_collection = db["users"]  # User subscriptions
-        plans_collection = db["plans"]  # Subscription plans
+        post_counter_collection = db["post_counters"]
+        users_collection = db["users"]
+        plans_collection = db["plans"]
         
-        # Create indexes
-        content_collection.create_index([("created_at", -1)])
-        content_collection.create_index([("tags", 1)])
-        content_collection.create_index([("channel", 1)])
-        content_collection.create_index([("post_number", -1)])
-        broadcast_collection.create_index([("created_at", -1)])
-        requests_collection.create_index([("status", 1)])
-        requests_collection.create_index([("views", -1)])
-        requests_collection.create_index([("createdAt", -1)])
-        requests_collection.create_index([("user_id", 1)])
-        users_collection.create_index([("user_id", 1)])
-        users_collection.create_index([("expiry_date", 1)])
-        users_collection.create_index([("is_active", 1)])
-        plans_collection.create_index([("duration_days", 1)])
-        
-        # Initialize default plans if not exist
+        # Initialize default plans
         init_default_plans()
         
         logger.info(f"MongoDB connected: {db_name}.{collection_name}")
@@ -153,7 +138,6 @@ def get_next_post_number(channel_name):
         return 1
 
 # --- USER SUBSCRIPTION FUNCTIONS ---
-
 def check_user_subscription(user_id):
     """Check if user has active subscription"""
     try:
@@ -171,29 +155,12 @@ def check_user_subscription(user_id):
         logger.error(f"Check subscription error: {e}")
         return False
 
-def get_user_subscription(user_id):
-    """Get user subscription details"""
-    try:
-        if users_collection is None:
-            return None
-            
-        user = users_collection.find_one({
-            'user_id': user_id,
-            'is_active': True
-        })
-        
-        return user
-    except Exception as e:
-        logger.error(f"Get subscription error: {e}")
-        return None
-
-def create_user_subscription(user_id, plan_id, amount_paid, payment_method="telegram"):
+def create_user_subscription(user_id, plan_id, amount_paid):
     """Create new user subscription"""
     try:
         if users_collection is None or plans_collection is None:
             return False
             
-        # Get plan details
         plan = plans_collection.find_one({'_id': ObjectId(plan_id)})
         if not plan:
             return False
@@ -206,86 +173,40 @@ def create_user_subscription(user_id, plan_id, amount_paid, payment_method="tele
             'plan_name': plan['name'],
             'duration_days': plan['duration_days'],
             'amount_paid': amount_paid,
-            'payment_method': payment_method,
             'purchase_date': datetime.utcnow(),
             'expiry_date': expiry_date,
-            'is_active': True,
-            'created_at': datetime.utcnow(),
-            'updated_at': datetime.utcnow()
+            'is_active': True
         }
         
-        # Update or insert user subscription
         users_collection.update_one(
             {'user_id': user_id},
             {'$set': subscription_data},
             upsert=True
         )
         
-        # Notify admin about new subscription
-        notify_admin_new_subscription(user_id, plan['name'], amount_paid)
-        
         return True
     except Exception as e:
         logger.error(f"Create subscription error: {e}")
         return False
-
-def notify_admin_new_subscription(user_id, plan_name, amount):
-    """Notify admin about new subscription"""
-    try:
-        message = f"""
-💰 New Subscription Purchase
-
-👤 User ID: {user_id}
-📋 Plan: {plan_name}
-💵 Amount: ₹{amount}
-📅 Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}
-
-User now has access to premium content!
-        """
-        
-        send_message(ADMIN_TELEGRAM_ID, message)
-    except Exception as e:
-        logger.error(f"Notify admin subscription error: {e}")
 
 # --- AUTHENTICATION ---
 def is_admin(user_id):
     """Check if user is admin"""
     return user_id == ADMIN_TELEGRAM_ID
 
-# --- CACHING ---
-content_cache = TTLCache(maxsize=50, ttl=30)  # Reduced cache size
-
-# --- VIEW TRACKING ---
-view_cache = {}
-view_lock = threading.RLock()
-
-def track_view(content_id):
-    with view_lock:
-        view_cache[content_id] = view_cache.get(content_id, 0) + 1
-
 # --- TELEGRAM SETUP ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-APP_URL = os.environ.get("APP_URL")
-PORT = int(os.environ.get("PORT", 8000))
-BOT_USERNAME = None  # Will be set after bot info fetch
-
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/" if BOT_TOKEN else None
+APP_URL = os.environ.get("APP_URL", "http://localhost:8000")
+PORT = int(os.environ.get("PORT", 8000))
+BOT_USERNAME = None
 
 app = Flask(__name__)
 CORS(app)
 
 USER_STATE = {}
 
-# Available channels for broadcast
-BROADCAST_CHANNELS = {
-    'diskwala': {'id': GROUP_TELEGRAM_ID, 'name': 'DiskWala Channel'},
-    'telugu': {'id': TELUGU_GROUP_ID, 'name': 'Telugu Channel'},
-    'video_files': {'id': CONTENT_FORWARD_CHANNEL_ID, 'name': 'Video Files Channel'}
-}
-
 # --- KEYBOARDS ---
-# Main keyboard for admin
 ADMIN_MAIN_KEYBOARD = {
     'keyboard': [
         [{'text': 'DiskWala Posts'}, {'text': 'Telugu Posts'}],
@@ -297,7 +218,6 @@ ADMIN_MAIN_KEYBOARD = {
     'resize_keyboard': True
 }
 
-# User keyboard for non-subscribed users
 USER_MAIN_KEYBOARD = {
     'keyboard': [
         [{'text': '📥 Request Video'}],
@@ -307,30 +227,11 @@ USER_MAIN_KEYBOARD = {
     'resize_keyboard': True
 }
 
-# User keyboard for subscribed users
 SUBSCRIBED_USER_KEYBOARD = {
     'keyboard': [
         [{'text': '📥 Request Video'}, {'text': '🎬 Video Files'}],
         [{'text': '🆕 My Requests'}, {'text': '📋 My Plan'}],
         [{'text': '❌ Cancel'}]
-    ],
-    'resize_keyboard': True
-}
-
-# Plans keyboard
-PLANS_KEYBOARD = {
-    'keyboard': [
-        [{'text': '2 Weeks - ₹40'}, {'text': '1 Month - ₹50'}],
-        [{'text': '1 Year - ₹200'}, {'text': 'Back to Menu'}]
-    ],
-    'resize_keyboard': True
-}
-
-SUBSCRIPTIONS_KEYBOARD = {
-    'keyboard': [
-        [{'text': '👥 Active Users'}, {'text': '📋 All Users'}],
-        [{'text': '💰 Plan Sales'}, {'text': '📢 Plan Broadcast'}],
-        [{'text': 'Back to Menu'}]
     ],
     'resize_keyboard': True
 }
@@ -352,10 +253,10 @@ BROADCAST_KEYBOARD = {
     'resize_keyboard': True
 }
 
-PLAN_BROADCAST_KEYBOARD = {
+PLANS_KEYBOARD = {
     'keyboard': [
-        [{'text': '🎯 All Users'}, {'text': '✅ Subscribed Users'}],
-        [{'text': '❌ Non-Subscribed Users'}, {'text': 'Back'}]
+        [{'text': '2 Weeks - ₹40'}, {'text': '1 Month - ₹50'}],
+        [{'text': '1 Year - ₹200'}, {'text': 'Back to Menu'}]
     ],
     'resize_keyboard': True
 }
@@ -377,25 +278,22 @@ REQUEST_MEDIA_KEYBOARD = {
 }
 
 # --- TELEGRAM FUNCTIONS ---
-
 def send_telegram(method, payload):
     if not TELEGRAM_API:
+        logger.error("Telegram API not configured")
         return False
     
-    clean = {k: v for k, v in payload.items() if v is not None}
-    
     try:
-        response = requests.post(TELEGRAM_API + method, json=clean, timeout=5)
+        response = requests.post(TELEGRAM_API + method, json=payload, timeout=5)
         response.raise_for_status()
         result = response.json()
         return result.get('result') if result.get('ok') else False
-            
     except Exception as e:
         logger.error(f"Telegram error: {e}")
         return False
 
-def send_message(chat_id, text, keyboard=None, parse_mode=None, disable_web_page_preview=True):
-    payload = {'chat_id': chat_id, 'text': text, 'disable_web_page_preview': disable_web_page_preview}
+def send_message(chat_id, text, keyboard=None, parse_mode=None):
+    payload = {'chat_id': chat_id, 'text': text}
     if keyboard:
         payload['reply_markup'] = json.dumps(keyboard)
     if parse_mode:
@@ -407,15 +305,11 @@ def send_media_post(title, media_id, media_type, links, channel_id, channel_name
     if not TELEGRAM_API:
         return False
 
-    # Get bot info for request URL
     bot_url = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "Contact Admin"
     
     link_text = "\n".join([f"🔗 {link.get('episode_title', 'Link')}: {link['url']}" for link in links])
     
-    # Add post number to caption if available
     post_number_text = f"#{post_number} " if post_number else ""
-    
-    # Add request button
     request_button = f"\n\n📥 Request Video: {bot_url}?start=request"
     
     caption = f"{post_number_text}🔥 {title} 🔥\n\n{link_text}{request_button}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
@@ -424,18 +318,6 @@ def send_media_post(title, media_id, media_type, links, channel_id, channel_name
     key = 'photo' if media_type == 'photo' else 'video'
     
     return send_telegram(method, {'chat_id': channel_id, key: media_id, 'caption': caption})
-
-def forward_message(chat_id, from_chat_id, message_id):
-    """Forward a message"""
-    try:
-        return send_telegram('forwardMessage', {
-            'chat_id': chat_id,
-            'from_chat_id': from_chat_id,
-            'message_id': message_id
-        })
-    except Exception as e:
-        logger.error(f"Forward message error: {e}")
-        return False
 
 def send_photo(chat_id, photo_id, caption=None):
     """Send photo by file_id"""
@@ -460,7 +342,6 @@ def send_video(chat_id, video_id, caption=None):
         return False
 
 # --- VIDEO REQUEST FUNCTIONS ---
-
 def create_video_request(user_id, media_id=None, media_type=None, message=None):
     """Create a new video request from user"""
     try:
@@ -474,9 +355,6 @@ def create_video_request(user_id, media_id=None, media_type=None, message=None):
             'telegram_message_id': message.get('message_id') if message else None,
             'status': 'pending',
             'video_result': None,
-            'result_media_id': None,
-            'result_media_type': None,
-            'views': 0,
             'createdAt': datetime.utcnow(),
             'updatedAt': datetime.utcnow()
         }
@@ -489,8 +367,12 @@ def create_video_request(user_id, media_id=None, media_type=None, message=None):
         request_doc['_id'] = str(result.inserted_id)
         
         # Send the media to admin immediately
-        if media_id and media_type and message:
-            forward_user_media_to_admin(media_id, media_type, request_doc['request_id'], message)
+        if media_id and media_type:
+            caption = f"🆕 Request #{request_doc['request_id']}\n👤 From: {user_id}"
+            if media_type == 'photo':
+                send_photo(ADMIN_TELEGRAM_ID, media_id, caption)
+            elif media_type == 'video':
+                send_video(ADMIN_TELEGRAM_ID, media_id, caption)
         
         # Send notification to admin
         notify_admin_new_request(request_doc)
@@ -500,19 +382,6 @@ def create_video_request(user_id, media_id=None, media_type=None, message=None):
     except Exception as e:
         logger.error(f"Create request error: {e}")
         return None
-
-def forward_user_media_to_admin(media_id, media_type, request_id, original_message):
-    """Forward user's media to admin"""
-    try:
-        caption = f"🆕 Request #{request_id}\n👤 From: {original_message['from']['id']}"
-        
-        if media_type == 'photo':
-            send_photo(ADMIN_TELEGRAM_ID, media_id, caption)
-        elif media_type == 'video':
-            send_video(ADMIN_TELEGRAM_ID, media_id, caption)
-            
-    except Exception as e:
-        logger.error(f"Forward media to admin error: {e}")
 
 def notify_admin_new_request(request_doc):
     """Notify admin about new video request"""
@@ -534,329 +403,9 @@ Commands:
 /sendmedia {request_id} - Send matching media to user
         """
         
-        # Send to admin
         send_message(ADMIN_TELEGRAM_ID, message)
-            
     except Exception as e:
         logger.error(f"Notify admin error: {e}")
-
-# --- USER SUBSCRIPTION HANDLERS ---
-
-def handle_plans_command(chat_id, user_id):
-    """Show subscription plans to user"""
-    try:
-        if plans_collection is None:
-            send_message(chat_id, "Plans not available at the moment.")
-            return
-        
-        plans = list(plans_collection.find({'is_active': True}).sort('duration_days', 1))
-        
-        if not plans:
-            send_message(chat_id, "No plans available at the moment.")
-            return
-        
-        message = "💰 Subscription Plans\n\n"
-        message += "Get direct video files - no links or ads!\n\n"
-        
-        for plan in plans:
-            message += f"📋 {plan['name']}\n"
-            message += f"💵 Price: ₹{plan['price']}\n"
-            message += f"⏳ Duration: {plan['duration_days']} days\n"
-            message += f"📝 {plan.get('description', '')}\n\n"
-        
-        message += f"To purchase, message: {PAYMENT_BOT_USERNAME}\n"
-        message += "After payment, send receipt to this bot with command:\n"
-        message += "/paid <plan_name> <amount>\n\n"
-        message += "Example: /paid \"1 Month\" 50"
-        
-        send_message(chat_id, message, PLANS_KEYBOARD)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
-def handle_paid_command(chat_id, user_id, text):
-    """Handle /paid command from user after payment"""
-    try:
-        parts = text.split(maxsplit=2)
-        if len(parts) < 3:
-            send_message(chat_id, "Usage: /paid <plan_name> <amount>\nExample: /paid \"1 Month\" 50")
-            return
-        
-        plan_name = parts[1].strip('"\'')
-        try:
-            amount = int(parts[2])
-        except:
-            send_message(chat_id, "Invalid amount. Use numbers only.")
-            return
-        
-        # Find plan
-        plan = plans_collection.find_one({
-            'name': plan_name,
-            'price': amount,
-            'is_active': True
-        })
-        
-        if not plan:
-            send_message(chat_id, f"Plan '{plan_name}' with price ₹{amount} not found.")
-            return
-        
-        # Ask for payment proof
-        USER_STATE[chat_id] = {
-            'step': 'waiting_payment_proof',
-            'user_id': user_id,
-            'plan_id': str(plan['_id']),
-            'plan_name': plan_name,
-            'amount': amount,
-            'timestamp': time.time()
-        }
-        
-        send_message(chat_id, f"Please send the payment receipt/screenshot for {plan_name} - ₹{amount}")
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
-def handle_user_plan_command(chat_id, user_id):
-    """Show user's current subscription plan"""
-    try:
-        user_sub = get_user_subscription(user_id)
-        
-        if not user_sub:
-            send_message(chat_id, "You don't have an active subscription.\n\nUse /plans to view available plans.")
-            return
-        
-        days_left = (user_sub['expiry_date'] - datetime.utcnow()).days
-        
-        message = "📋 Your Subscription\n\n"
-        message += f"📋 Plan: {user_sub.get('plan_name', 'Unknown')}\n"
-        message += f"💵 Amount Paid: ₹{user_sub.get('amount_paid', 0)}\n"
-        message += f"📅 Purchased: {user_sub.get('purchase_date', datetime.utcnow()).strftime('%Y-%m-%d')}\n"
-        message += f"📅 Expires: {user_sub.get('expiry_date', datetime.utcnow()).strftime('%Y-%m-%d')}\n"
-        message += f"⏳ Days Left: {max(0, days_left)} days\n"
-        message += f"✅ Status: {'Active' if user_sub.get('is_active', False) else 'Inactive'}\n\n"
-        
-        if days_left <= 7:
-            message += "⚠️ Your subscription is expiring soon!\n"
-            message += f"Renew now to continue access: /plans\n"
-        
-        send_message(chat_id, message)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
-def handle_video_files_access(chat_id, user_id):
-    """Handle video files access for subscribed users"""
-    try:
-        if not check_user_subscription(user_id):
-            send_message(chat_id, "⛔ Access Denied\n\nYou need an active subscription to access video files.\n\nUse /plans to subscribe.")
-            return
-        
-        # For now, just show a message. You can expand this to show actual video files
-        message = "🎬 Video Files Access\n\n"
-        message += "✅ You have access to premium video files!\n\n"
-        message += "Available commands:\n"
-        message += "/latest - Get latest video files\n"
-        message += "/search <keyword> - Search videos\n"
-        message += "/categories - Browse by category\n\n"
-        message += "More features coming soon!"
-        
-        send_message(chat_id, message)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
-# --- ADMIN SUBSCRIPTION MANAGEMENT ---
-
-def handle_admin_subscriptions(chat_id):
-    """Show admin subscriptions menu"""
-    USER_STATE[chat_id] = {'step': 'subscriptions_menu', 'timestamp': time.time()}
-    send_message(chat_id, "💰 Subscription Management\n\nSelect an option:", SUBSCRIPTIONS_KEYBOARD)
-
-def handle_active_users_command(chat_id):
-    """Show active subscribed users"""
-    try:
-        if users_collection is None:
-            send_message(chat_id, "Database not available")
-            return
-            
-        active_users = list(users_collection.find({
-            'is_active': True,
-            'expiry_date': {'$gt': datetime.utcnow()}
-        }).sort('expiry_date', 1).limit(20))
-        
-        if not active_users:
-            send_message(chat_id, "No active subscribers")
-            return
-        
-        message = "👥 Active Subscribers\n\n"
-        total_revenue = 0
-        
-        for user in active_users:
-            days_left = (user['expiry_date'] - datetime.utcnow()).days
-            message += f"👤 User ID: {user['user_id']}\n"
-            message += f"📋 Plan: {user.get('plan_name', 'Unknown')}\n"
-            message += f"⏳ Days Left: {days_left}\n"
-            message += f"📅 Expires: {user['expiry_date'].strftime('%Y-%m-%d')}\n\n"
-            total_revenue += user.get('amount_paid', 0)
-        
-        message += f"💰 Total Active Subscribers: {len(active_users)}\n"
-        message += f"💵 Total Revenue: ₹{total_revenue}"
-        
-        send_message(chat_id, message)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
-def handle_all_users_command(chat_id):
-    """Show all users"""
-    try:
-        if users_collection is None:
-            send_message(chat_id, "Database not available")
-            return
-            
-        all_users = list(users_collection.find().sort('purchase_date', -1).limit(20))
-        
-        if not all_users:
-            send_message(chat_id, "No users found")
-            return
-        
-        message = "📋 All Users\n\n"
-        active_count = 0
-        total_revenue = 0
-        
-        for user in all_users:
-            is_active = user.get('is_active', False) and user.get('expiry_date', datetime.utcnow()) > datetime.utcnow()
-            status = "✅ Active" if is_active else "❌ Inactive"
-            
-            if is_active:
-                active_count += 1
-            
-            message += f"👤 {user['user_id']} - {status}\n"
-            message += f"📋 {user.get('plan_name', 'Unknown')} - ₹{user.get('amount_paid', 0)}\n"
-            message += f"📅 {user.get('purchase_date', datetime.utcnow()).strftime('%Y-%m-%d')}\n\n"
-            total_revenue += user.get('amount_paid', 0)
-        
-        message += f"📊 Stats:\n"
-        message += f"✅ Active Users: {active_count}\n"
-        message += f"📈 Total Users: {len(all_users)}\n"
-        message += f"💰 Total Revenue: ₹{total_revenue}"
-        
-        send_message(chat_id, message)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
-def handle_plan_sales_command(chat_id):
-    """Show plan sales statistics"""
-    try:
-        if users_collection is None or plans_collection is None:
-            send_message(chat_id, "Database not available")
-            return
-        
-        # Get all plans
-        all_plans = list(plans_collection.find({'is_active': True}))
-        
-        message = "💰 Plan Sales Statistics\n\n"
-        
-        total_revenue = 0
-        total_sales = 0
-        
-        for plan in all_plans:
-            # Count sales for this plan
-            plan_sales = users_collection.count_documents({
-                'plan_id': plan['_id']
-            })
-            
-            # Calculate revenue for this plan
-            plan_revenue = 0
-            plan_users = list(users_collection.find({'plan_id': plan['_id']}))
-            for user in plan_users:
-                plan_revenue += user.get('amount_paid', 0)
-            
-            message += f"📋 {plan['name']} - ₹{plan['price']}\n"
-            message += f"   📈 Sales: {plan_sales}\n"
-            message += f"   💵 Revenue: ₹{plan_revenue}\n\n"
-            
-            total_sales += plan_sales
-            total_revenue += plan_revenue
-        
-        message += f"📊 Totals:\n"
-        message += f"📈 Total Sales: {total_sales}\n"
-        message += f"💰 Total Revenue: ₹{total_revenue}"
-        
-        send_message(chat_id, message)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
-def handle_plan_broadcast_menu(chat_id):
-    """Show plan broadcast menu"""
-    USER_STATE[chat_id] = {'step': 'plan_broadcast_select', 'timestamp': time.time()}
-    send_message(chat_id, "📢 Plan Promotion Broadcast\n\nSelect target audience:", PLAN_BROADCAST_KEYBOARD)
-
-def broadcast_plan_promotion(chat_id, target_type, message_text):
-    """Broadcast plan promotion to selected users"""
-    try:
-        if users_collection is None:
-            send_message(chat_id, "Database not available")
-            return
-        
-        # Prepare promotion message
-        promotion_message = f"💰 {PRODUCT_NAME} Premium Plans\n\n"
-        promotion_message += "Get direct video files - no links or ads!\n\n"
-        
-        # Add available plans
-        plans = list(plans_collection.find({'is_active': True}).sort('duration_days', 1))
-        for plan in plans:
-            promotion_message += f"📋 {plan['name']} - ₹{plan['price']}\n"
-            promotion_message += f"⏳ {plan['duration_days']} days access\n\n"
-        
-        promotion_message += f"💬 Message to purchase: {PAYMENT_BOT_USERNAME}\n"
-        promotion_message += "📱 After payment, send receipt to this bot with /paid command\n\n"
-        promotion_message += message_text
-        
-        # Get target users
-        if target_type == 'all':
-            users = users_collection.distinct('user_id')
-        elif target_type == 'subscribed':
-            users = users_collection.distinct('user_id', {
-                'is_active': True,
-                'expiry_date': {'$gt': datetime.utcnow()}
-            })
-        else:  # non-subscribed
-            all_users = set(users_collection.distinct('user_id'))
-            subscribed_users = set(users_collection.distinct('user_id', {
-                'is_active': True,
-                'expiry_date': {'$gt': datetime.utcnow()}
-            }))
-            users = list(all_users - subscribed_users)
-        
-        if not users:
-            send_message(chat_id, f"No users found for target: {target_type}")
-            return
-        
-        success_count = 0
-        failed_count = 0
-        
-        send_message(chat_id, f"📤 Broadcasting to {len(users)} users...")
-        
-        for user_id in users[:100]:  # Limit to 100 users to avoid rate limiting
-            try:
-                send_message(user_id, promotion_message)
-                success_count += 1
-                time.sleep(0.1)  # Rate limiting
-            except:
-                failed_count += 1
-        
-        result_message = f"✅ Broadcast Complete!\n\n"
-        result_message += f"✅ Success: {success_count}\n"
-        result_message += f"❌ Failed: {failed_count}\n"
-        result_message += f"📊 Total: {len(users)}"
-        
-        send_message(chat_id, result_message, ADMIN_MAIN_KEYBOARD)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
 
 def handle_user_request(chat_id, user_id):
     """Handle user's video request initiation"""
@@ -892,6 +441,45 @@ def handle_request_media(chat_id, user_id, text):
         }
         send_message(chat_id, "🎥 Please send a video clip of what you're looking for:")
 
+def process_user_media_request(chat_id, user_id, message, step=None):
+    """Process user's media request"""
+    media_id = None
+    media_type = None
+    
+    if 'photo' in message:
+        media_id = message['photo'][-1]['file_id']
+        media_type = 'photo'
+    elif 'video' in message:
+        media_id = message['video']['file_id']
+        media_type = 'video'
+    else:
+        send_message(chat_id, "❌ Please send a photo or video")
+        return
+    
+    # Create request
+    request_doc = create_video_request(
+        user_id=user_id,
+        media_id=media_id,
+        media_type=media_type,
+        message=message
+    )
+    
+    if request_doc:
+        send_message(
+            chat_id,
+            f"✅ Request Submitted!\n\n"
+            f"🆔 Request ID: {request_doc['request_id']}\n"
+            f"📸 Media Type: {media_type}\n\n"
+            f"✅ Your media has been forwarded to admin.\n"
+            f"We'll notify you when we find the matching video!",
+            USER_MAIN_KEYBOARD
+        )
+    else:
+        send_message(chat_id, "❌ Failed to submit request. Please try again.", USER_MAIN_KEYBOARD)
+    
+    USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+
+# --- ADMIN COMMAND HANDLERS ---
 def handle_reply_command(chat_id, text):
     """Handle /reply command to send video directly to user"""
     try:
@@ -1036,8 +624,6 @@ def handle_admin_matching_media(chat_id, message, state):
                     '$set': {
                         'status': 'completed',
                         'video_result': 'Media forwarded',
-                        'result_media_id': media_id,
-                        'result_media_type': media_type,
                         'updatedAt': datetime.utcnow()
                     }
                 }
@@ -1053,34 +639,291 @@ def handle_admin_matching_media(chat_id, message, state):
         send_message(chat_id, f"Error: {str(e)}")
         USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
 
-def handle_complete_command(chat_id, text):
-    """Handle /complete command from admin for video requests"""
+# --- ADMIN POSTING FLOW ---
+def handle_admin_posting_flow(chat_id, text, message, state):
+    """Handle admin posting flow"""
+    if text == 'DiskWala Posts':
+        USER_STATE[chat_id] = {
+            'step': 'channel_mode',
+            'channel_type': 'diskwala',
+            'channel_id': GROUP_TELEGRAM_ID,
+            'channel_name': 'DiskWala',
+            'timestamp': time.time()
+        }
+        send_message(
+            chat_id,
+            "📁 DiskWala Posts\n\n"
+            "✏️ Single Post - Create one post\n"
+            "📨 Forward Multiple - Forward directly\n\n"
+            "Choose method:",
+            CHANNEL_MODE_KEYBOARD
+        )
+        return True
+        
+    elif text == 'Telugu Posts':
+        USER_STATE[chat_id] = {
+            'step': 'channel_mode',
+            'channel_type': 'telugu',
+            'channel_id': TELUGU_GROUP_ID,
+            'channel_name': 'Telugu',
+            'timestamp': time.time()
+        }
+        send_message(
+            chat_id,
+            "🇮🇳 Telugu Posts\n\n"
+            "✏️ Single Post - Create one post\n"
+            "📨 Forward Multiple - Forward directly\n\n"
+            "Choose method:",
+            CHANNEL_MODE_KEYBOARD
+        )
+        return True
+        
+    elif text == 'Video Files':
+        USER_STATE[chat_id] = {'step': 'video_files', 'timestamp': time.time()}
+        send_message(
+            chat_id,
+            "🎬 Video Files Mode\n\n"
+            "Send files one by one.\n"
+            "Type 'Cancel' when done."
+        )
+        return True
+        
+    elif text == '📢 Broadcast':
+        USER_STATE[chat_id] = {'step': 'broadcast_select', 'timestamp': time.time()}
+        send_message(
+            chat_id,
+            "📢 Broadcast Message\n\n"
+            "Select channel(s) to broadcast:\n\n"
+            "📺 DiskWala - DiskWala channel only\n"
+            "🇮🇳 Telugu - Telugu channel only\n"
+            "🎬 Video Files - Video Files channel only\n"
+            "📡 All Channels - Send to all channels\n\n"
+            "Choose target:",
+            BROADCAST_KEYBOARD
+        )
+        return True
+        
+    elif text == '📥 Video Requests':
+        USER_STATE[chat_id] = {'step': 'requests_menu', 'timestamp': time.time()}
+        send_message(
+            chat_id,
+            "📥 Video Requests Management\n\n"
+            "📋 Pending Requests - View pending requests\n"
+            "📊 All Requests - View all requests\n\n"
+            "Commands:\n"
+            "/reply <id> <url> - Send video URL to user\n"
+            "/sendmedia <id> - Send matching media to user",
+            REQUESTS_KEYBOARD
+        )
+        return True
+        
+    elif text == '📊 Stats':
+        handle_stats_command(chat_id)
+        return True
+        
+    elif text == '💰 Subscriptions':
+        handle_subscriptions_menu(chat_id)
+        return True
+        
+    elif text == '📋 Plans':
+        handle_plans_command(chat_id, ADMIN_TELEGRAM_ID)
+        return True
+    
+    # Handle channel mode selection
+    elif state['step'] == 'channel_mode':
+        if text == 'Single Post':
+            USER_STATE[chat_id]['step'] = 'channel_media'
+            USER_STATE[chat_id]['data'] = {}
+            send_message(chat_id, f"📤 {state['channel_name']} - Step 1/3: Send thumbnail (photo/video)")
+            return True
+        elif text == 'Forward Multiple':
+            USER_STATE[chat_id]['step'] = 'channel_forward'
+            send_message(chat_id, f"📨 Forward messages to {state['channel_name']} channel. Type 'Cancel' when done.")
+            return True
+    
+    # Handle channel media
+    elif state['step'] == 'channel_media':
+        if 'video' in message:
+            media_id = message['video']['file_id']
+            media_type = 'video'
+        elif 'photo' in message:
+            media_id = message['photo'][-1]['file_id']
+            media_type = 'photo'
+        else:
+            send_message(chat_id, "❌ Send photo or video")
+            return True
+        
+        USER_STATE[chat_id]['data'] = {
+            'telegram_media_id': media_id, 
+            'media_type': media_type
+        }
+        USER_STATE[chat_id]['step'] = 'channel_title'
+        send_message(chat_id, f"✅ {media_type.title()} saved!\n\nStep 2/3: Send title")
+        return True
+    
+    # Handle channel title
+    elif state['step'] == 'channel_title':
+        USER_STATE[chat_id]['data']['title'] = text.strip()
+        USER_STATE[chat_id]['step'] = 'channel_urls'
+        send_message(chat_id, "✅ Title saved!\n\nStep 3/3: Send URLs (one per line)")
+        return True
+    
+    # Handle channel URLs
+    elif state['step'] == 'channel_urls':
+        urls = [url.strip() for url in text.strip().split('\n') if url.strip()]
+        
+        if not urls:
+            send_message(chat_id, "❌ Send valid URLs")
+            return True
+        
+        title = state['data']['title']
+        media_id = state['data']['telegram_media_id']
+        media_type = state['data']['media_type']
+        channel_id = state.get('channel_id', GROUP_TELEGRAM_ID)
+        channel_name = state.get('channel_name', 'Channel')
+        channel_type = state.get('channel_type', 'diskwala')
+        
+        links = [{"url": url, "episode_title": "Watch Now" if i == 0 else f"Link {i+1}"} 
+                 for i, url in enumerate(urls)]
+        
+        post_number = get_next_post_number(channel_type)
+        send_message(chat_id, f"⏳ Posting to {channel_name}...")
+        
+        result = send_media_post(title, media_id, media_type, links, channel_id, channel_name, post_number)
+        
+        if result:
+            try:
+                content_data = {
+                    "title": title,
+                    "type": "video",
+                    "channel": channel_type,
+                    "post_number": post_number,
+                    "thumbnail_url": f"telegram_file_id:{media_id}",
+                    "post_type": f"{channel_type}_{media_type}",
+                    "telegram_media_id": media_id,
+                    "telegram_chat_id": channel_id,
+                    "diskwala_url": urls[0],
+                    "tags": title.lower().split(),
+                    "links": links,
+                    "views": 0,
+                    "created_at": datetime.utcnow()
+                }
+                content_collection.insert_one(content_data)
+                
+                msg = f"🎉 Success!\n✅ Posted to {channel_name} channel\n📊 Post #: {post_number}"
+                send_message(chat_id, msg, ADMIN_MAIN_KEYBOARD)
+            except Exception as e:
+                logger.error(f"Save content error: {e}")
+                send_message(chat_id, f"✅ Posted to {channel_name} but failed to save to database")
+        else:
+            send_message(chat_id, f"❌ Failed to post to {channel_name}", ADMIN_MAIN_KEYBOARD)
+        
+        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+        return True
+    
+    # Handle requests menu
+    elif state['step'] == 'requests_menu':
+        if text == '📋 Pending Requests':
+            handle_requests_command(chat_id)
+            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+            return True
+        elif text == '📊 All Requests':
+            handle_all_requests_command(chat_id)
+            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+            return True
+    
+    # Handle broadcast select
+    elif state['step'] == 'broadcast_select':
+        channel_map = {
+            '📺 DiskWala': ['diskwala'],
+            '🇮🇳 Telugu': ['telugu'],
+            '🎬 Video Files': ['video_files'],
+            '📡 All Channels': ['diskwala', 'telugu', 'video_files']
+        }
+        
+        if text in channel_map:
+            USER_STATE[chat_id] = {
+                'step': 'broadcast_content',
+                'channels': channel_map[text],
+                'timestamp': time.time()
+            }
+            send_message(chat_id, f"✅ Selected channels\n\nNow send your broadcast message (text or media with caption)")
+            return True
+    
+    # Handle broadcast content
+    elif state['step'] == 'broadcast_content':
+        channels = state['channels']
+        broadcast_text = text
+        media_id = None
+        media_type = None
+        
+        if 'photo' in message:
+            media_id = message['photo'][-1]['file_id']
+            media_type = 'photo'
+            broadcast_text = message.get('caption', '')
+        elif 'video' in message:
+            media_id = message['video']['file_id']
+            media_type = 'video'
+            broadcast_text = message.get('caption', '')
+        
+        # Simple broadcast implementation
+        channel_ids = {
+            'diskwala': GROUP_TELEGRAM_ID,
+            'telugu': TELUGU_GROUP_ID,
+            'video_files': CONTENT_FORWARD_CHANNEL_ID
+        }
+        
+        for channel_key in channels:
+            channel_id = channel_ids.get(channel_key)
+            if channel_id:
+                if media_id and media_type:
+                    if media_type == 'photo':
+                        send_photo(channel_id, media_id, broadcast_text)
+                    else:
+                        send_video(channel_id, media_id, broadcast_text)
+                else:
+                    send_message(channel_id, broadcast_text)
+        
+        send_message(chat_id, f"✅ Broadcast sent to {len(channels)} channel(s)", ADMIN_MAIN_KEYBOARD)
+        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+        return True
+    
+    return False
+
+# --- SUBSCRIPTION HANDLERS ---
+def handle_subscriptions_menu(chat_id):
+    """Handle subscriptions menu"""
+    send_message(chat_id, "💰 Subscription Management\n\nComing soon...", ADMIN_MAIN_KEYBOARD)
+
+def handle_plans_command(chat_id, user_id):
+    """Show subscription plans"""
     try:
-        parts = text.split(maxsplit=2)
-        if len(parts) < 3:
-            send_message(chat_id, "Usage: /complete <request_id> <video_url>")
+        if plans_collection is None:
+            send_message(chat_id, "Plans not available at the moment.")
             return
         
-        request_id = parts[1]
-        video_url = parts[2]
+        plans = list(plans_collection.find({'is_active': True}).sort('duration_days', 1))
         
-        # Update request
-        result = requests_collection.update_one(
-            {'request_id': request_id},
-            {
-                '$set': {
-                    'status': 'completed',
-                    'video_result': video_url,
-                    'updatedAt': datetime.utcnow()
-                }
-            }
-        )
+        if not plans:
+            send_message(chat_id, "No plans available at the moment.")
+            return
         
-        if result.modified_count > 0:
-            send_message(chat_id, f"✅ Request {request_id} marked as completed!")
-        else:
-            send_message(chat_id, f"❌ Request {request_id} not found")
-            
+        message = "💰 Subscription Plans\n\n"
+        message += "Get direct video files - no links or ads!\n\n"
+        
+        for plan in plans:
+            message += f"📋 {plan['name']}\n"
+            message += f"💵 Price: ₹{plan['price']}\n"
+            message += f"⏳ Duration: {plan['duration_days']} days\n"
+            message += f"📝 {plan.get('description', '')}\n\n"
+        
+        message += f"To purchase, message: {PAYMENT_BOT_USERNAME}\n"
+        message += "After payment, send receipt to this bot with command:\n"
+        message += "/paid <plan_name> <amount>\n\n"
+        message += "Example: /paid \"1 Month\" 50"
+        
+        send_message(chat_id, message, PLANS_KEYBOARD)
+        
     except Exception as e:
         send_message(chat_id, f"Error: {str(e)}")
 
@@ -1134,35 +977,49 @@ def handle_all_requests_command(chat_id):
     except Exception as e:
         send_message(chat_id, f"Error: {str(e)}")
 
-def handle_user_requests_command(chat_id, user_id):
-    """Show user's own requests"""
+def handle_stats_command(chat_id):
+    """Handle stats command"""
     try:
-        if requests_collection is None:
-            send_message(chat_id, "Database not available")
-            return
-            
-        user_requests = list(requests_collection.find({'user_id': user_id}).sort('createdAt', -1).limit(10))
+        stats = {
+            "total_content": 0,
+            "total_requests": 0,
+            "pending_requests": 0,
+            "completed_requests": 0,
+            "channels": {
+                'diskwala': 0,
+                'telugu': 0,
+                'video_files': 0
+            }
+        }
         
-        if not user_requests:
-            send_message(chat_id, "You haven't made any requests yet.")
-            return
+        if content_collection is not None:
+            stats["total_content"] = content_collection.count_documents({})
+            stats["channels"]['diskwala'] = content_collection.count_documents({"channel": 'diskwala'})
+            stats["channels"]['telugu'] = content_collection.count_documents({"channel": 'telugu'})
+            stats["channels"]['video_files'] = content_collection.count_documents({"channel": 'video_files'})
         
-        message = "📋 Your Requests:\n\n"
-        for req in user_requests:
-            status_emoji = "✅" if req['status'] == 'completed' else "⏳"
-            message += f"{status_emoji} {req['request_id']} - {req['status']}\n"
-            message += f"📸 Type: {req.get('media_type', 'Unknown')}\n"
-            if req['status'] == 'completed' and req.get('video_result'):
-                message += f"🔗 {req['video_result']}\n"
-            message += "\n"
+        if requests_collection is not None:
+            stats["total_requests"] = requests_collection.count_documents({})
+            stats["pending_requests"] = requests_collection.count_documents({"status": "pending"})
+            stats["completed_requests"] = requests_collection.count_documents({"status": "completed"})
+        
+        message = "📊 System Statistics\n\n"
+        message += f"📁 Total Posts: {stats['total_content']}\n"
+        message += f"📥 Total Requests: {stats['total_requests']}\n"
+        message += f"⏳ Pending Requests: {stats['pending_requests']}\n"
+        message += f"✅ Completed Requests: {stats['completed_requests']}\n\n"
+        
+        message += "📈 Channel Posts:\n"
+        message += f"  • DiskWala: {stats['channels']['diskwala']}\n"
+        message += f"  • Telugu: {stats['channels']['telugu']}\n"
+        message += f"  • Video Files: {stats['channels']['video_files']}\n"
         
         send_message(chat_id, message)
         
     except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
+        send_message(chat_id, f"Error getting stats: {str(e)}")
 
-# --- TELEGRAM UPDATE HANDLER ---
-
+# --- MAIN UPDATE HANDLER ---
 def process_update(update):
     try:
         message = update.get('message')
@@ -1180,27 +1037,19 @@ def process_update(update):
         is_subscribed = check_user_subscription(user_id)
         user_keyboard = SUBSCRIBED_USER_KEYBOARD if is_subscribed else USER_MAIN_KEYBOARD
         
-        # Handle start command with parameters
+        logger.info(f"Processing update - Chat: {chat_id}, User: {user_id}, Text: '{text}', Admin: {admin}")
+        
+        # Handle start command
         if text.startswith('/start'):
             params = text.split()
             if len(params) > 1 and params[1] == 'request':
-                # User clicked request button from channel
                 handle_user_request(chat_id, user_id)
                 return
             
-            # Regular start command
             if admin:
                 send_message(
                     chat_id,
                     f"🚀 {PRODUCT_NAME} Admin Bot\n\n"
-                    f"📁 DiskWala Posts - Post to DiskWala channel\n"
-                    f"🇮🇳 Telugu Posts - Post to Telugu channel\n"
-                    f"🎬 Video Files - Forward files to video channel\n"
-                    f"📢 Broadcast - Send message to channels\n"
-                    f"📥 Video Requests - Manage video requests\n"
-                    f"📊 Stats - View system statistics\n"
-                    f"💰 Subscriptions - Manage user subscriptions\n"
-                    f"📋 Plans - View subscription plans\n\n"
                     f"Choose an option:",
                     ADMIN_MAIN_KEYBOARD
                 )
@@ -1208,27 +1057,16 @@ def process_update(update):
                 welcome_msg = f"👋 Welcome to {PRODUCT_NAME}!\n\n"
                 if is_subscribed:
                     welcome_msg += "✅ You have an active subscription!\n\n"
-                    welcome_msg += "Here you can:\n"
-                    welcome_msg += "📥 Request Video - Request specific videos\n"
-                    welcome_msg += "🎬 Video Files - Access premium video files\n"
-                    welcome_msg += "🆕 My Requests - Check your request status\n"
-                    welcome_msg += "📋 My Plan - View subscription details\n"
+                    welcome_msg += "Choose an option:"
                 else:
-                    welcome_msg += "Here you can:\n"
-                    welcome_msg += "📥 Request Video - Request specific videos\n"
-                    welcome_msg += "🆕 My Requests - Check your request status\n"
-                    welcome_msg += "💰 Buy Plan - Subscribe for premium access\n\n"
-                    welcome_msg += "💎 Premium features:\n"
-                    welcome_msg += "• Direct video files (no ads/links)\n"
-                    welcome_msg += "• Faster response times\n"
-                    welcome_msg += "• Priority support\n"
+                    welcome_msg += "Choose an option:"
                 
                 send_message(chat_id, welcome_msg, user_keyboard)
             
             USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
             return
         
-        # --- MAIN MENU HANDLING ---
+        # Handle menu commands
         if text in ['Back to Menu', 'Cancel', '❌ Cancel', 'Back']:
             USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
             if admin:
@@ -1237,8 +1075,10 @@ def process_update(update):
                 send_message(chat_id, "Back to main menu:", user_keyboard)
             return
         
-        # --- ADMIN COMMANDS ---
+        # --- ADMIN FLOW ---
         if admin:
+            state = USER_STATE.get(chat_id, {'step': 'main', 'timestamp': time.time()})
+            
             # Handle admin commands
             if text.startswith('/reply'):
                 handle_reply_command(chat_id, text)
@@ -1246,152 +1086,31 @@ def process_update(update):
             elif text.startswith('/sendmedia'):
                 handle_sendmedia_command(chat_id, text)
                 return
-            elif text.startswith('/complete'):
-                handle_complete_command(chat_id, text)
-                return
-            elif text == '/requests':
-                handle_requests_command(chat_id)
-                return
             
             # Handle admin sending matching media
-            state = USER_STATE.get(chat_id, {'step': 'main', 'timestamp': time.time()})
             if state['step'] == 'sending_matching_media':
                 handle_admin_matching_media(chat_id, message, state)
                 return
             
-            # Handle payment proof from users
-            if state['step'] == 'reviewing_payment':
-                handle_admin_payment_review(chat_id, message, state)
+            # Try admin posting flow
+            if handle_admin_posting_flow(chat_id, text, message, state):
                 return
             
-            # Admin menu options
-            if text == '💰 Subscriptions':
-                handle_admin_subscriptions(chat_id)
-                return
-            
-            elif text == '📋 Plans':
-                handle_plans_command(chat_id, user_id)
-                return
-            
-            # Subscriptions menu
-            elif state['step'] == 'subscriptions_menu':
-                if text == '👥 Active Users':
-                    handle_active_users_command(chat_id)
-                    return
-                elif text == '📋 All Users':
-                    handle_all_users_command(chat_id)
-                    return
-                elif text == '💰 Plan Sales':
-                    handle_plan_sales_command(chat_id)
-                    return
-                elif text == '📢 Plan Broadcast':
-                    handle_plan_broadcast_menu(chat_id)
-                    return
-            
-            # Plan broadcast menu
-            elif state['step'] == 'plan_broadcast_select':
-                if text == '🎯 All Users':
-                    USER_STATE[chat_id] = {
-                        'step': 'plan_broadcast_message',
-                        'target': 'all',
-                        'timestamp': time.time()
-                    }
-                    send_message(chat_id, "Enter promotion message to send to all users:")
-                    return
-                elif text == '✅ Subscribed Users':
-                    USER_STATE[chat_id] = {
-                        'step': 'plan_broadcast_message',
-                        'target': 'subscribed',
-                        'timestamp': time.time()
-                    }
-                    send_message(chat_id, "Enter promotion message to send to subscribed users:")
-                    return
-                elif text == '❌ Non-Subscribed Users':
-                    USER_STATE[chat_id] = {
-                        'step': 'plan_broadcast_message',
-                        'target': 'non_subscribed',
-                        'timestamp': time.time()
-                    }
-                    send_message(chat_id, "Enter promotion message to send to non-subscribed users:")
-                    return
-            
-            # Plan broadcast message
-            elif state['step'] == 'plan_broadcast_message':
-                broadcast_plan_promotion(chat_id, state['target'], text)
-                USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-                return
-            
-            # Video requests menu
-            elif text == '📥 Video Requests':
-                USER_STATE[chat_id] = {'step': 'requests_menu', 'timestamp': time.time()}
-                send_message(
-                    chat_id,
-                    "📥 Video Requests Management\n\n"
-                    "📋 Pending Requests - View pending requests\n"
-                    "📊 All Requests - View all requests\n\n"
-                    "Commands:\n"
-                    "/reply <id> <url> - Send video URL to user\n"
-                    "/sendmedia <id> - Send matching media to user\n"
-                    "/complete <id> <url> - Mark as completed",
-                    REQUESTS_KEYBOARD
-                )
-                return
-            
-            # Requests menu
-            elif state['step'] == 'requests_menu':
-                if text == '📋 Pending Requests':
-                    handle_requests_command(chat_id)
-                    USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-                    return
-                elif text == '📊 All Requests':
-                    handle_all_requests_command(chat_id)
-                    USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-                    return
-            
-            # Stats
-            elif text == '📊 Stats':
-                handle_stats_command(chat_id)
-                return
-            
-            # Rest of admin flow (posting, broadcasting, etc.)
-            # ... [same as previous code for admin posting flow]
-            
+            # If no handler matched, show menu
+            send_message(chat_id, "Please select an option:", ADMIN_MAIN_KEYBOARD)
+        
         # --- USER FLOW ---
         else:
             state = USER_STATE.get(chat_id, {'step': 'main', 'timestamp': time.time()})
             
-            # Handle /paid command from user
-            if text.startswith('/paid'):
-                handle_paid_command(chat_id, user_id, text)
-                return
-            
             # Handle /plans command
-            elif text == '/plans' or text == '💰 Buy Plan':
+            if text == '/plans' or text == '💰 Buy Plan':
                 handle_plans_command(chat_id, user_id)
                 return
             
-            # Handle /myplan command
-            elif text == '/myplan' or text == '📋 My Plan':
-                handle_user_plan_command(chat_id, user_id)
-                return
-            
-            # Handle video files access for subscribed users
-            elif text == '🎬 Video Files':
-                handle_video_files_access(chat_id, user_id)
-                return
-            
             # User menu options
-            elif text == '📥 Request Video':
+            if text == '📥 Request Video':
                 handle_user_request(chat_id, user_id)
-                return
-            
-            elif text == '🆕 My Requests':
-                handle_user_requests_command(chat_id, user_id)
-                return
-            
-            # Handle payment proof
-            elif state['step'] == 'waiting_payment_proof':
-                handle_user_payment_proof(chat_id, user_id, message, state)
                 return
             
             # User request media selection
@@ -1404,7 +1123,6 @@ def process_update(update):
             
             # Handle user sending media
             elif state['step'] in ['waiting_photo', 'waiting_video']:
-                # Check if user sent appropriate media
                 if state['step'] == 'waiting_photo' and 'photo' not in message:
                     send_message(chat_id, "Please send a photo or select 'Cancel'")
                     return
@@ -1413,19 +1131,16 @@ def process_update(update):
                     send_message(chat_id, "Please send a video or select 'Cancel'")
                     return
                 
-                # Process the media submission
                 process_user_media_request(chat_id, user_id, message, state['step'])
                 return
             
-            # Handle user sending media without going through menu
+            # Handle user sending media directly
             elif ('photo' in message or 'video' in message) and state['step'] == 'main':
-                # User sent media directly, treat as request
                 process_user_media_request(chat_id, user_id, message)
                 return
             
-            # Unknown command for user
-            else:
-                send_message(chat_id, "Please select an option from the menu:", user_keyboard)
+            # If no handler matched, show menu
+            send_message(chat_id, "Please select an option:", user_keyboard)
         
     except Exception as e:
         logger.error(f"Process error: {e}", exc_info=True)
@@ -1438,215 +1153,7 @@ def process_update(update):
         except:
             pass
 
-def handle_user_payment_proof(chat_id, user_id, message, state):
-    """Handle user sending payment proof"""
-    try:
-        plan_id = state['plan_id']
-        plan_name = state['plan_name']
-        amount = state['amount']
-        
-        # Forward payment proof to admin
-        if 'photo' in message or 'document' in message:
-            # Forward media to admin
-            if 'photo' in message:
-                photo_id = message['photo'][-1]['file_id']
-                send_photo(ADMIN_TELEGRAM_ID, photo_id, 
-                          f"💰 Payment Proof from User {user_id}\nPlan: {plan_name}\nAmount: ₹{amount}")
-            elif 'document' in message:
-                # Forward document
-                forward_message(ADMIN_TELEGRAM_ID, chat_id, message['message_id'])
-                send_message(ADMIN_TELEGRAM_ID, 
-                           f"💰 Payment Proof from User {user_id}\nPlan: {plan_name}\nAmount: ₹{amount}")
-            
-            # Update user state for admin review
-            USER_STATE[ADMIN_TELEGRAM_ID] = {
-                'step': 'reviewing_payment',
-                'user_id': user_id,
-                'plan_id': plan_id,
-                'plan_name': plan_name,
-                'amount': amount,
-                'timestamp': time.time()
-            }
-            
-            # Notify admin
-            admin_msg = f"💰 New Payment Proof Received\n\n"
-            admin_msg += f"👤 User ID: {user_id}\n"
-            admin_msg += f"📋 Plan: {plan_name}\n"
-            admin_msg += f"💵 Amount: ₹{amount}\n\n"
-            admin_msg += "Send 'approve' to activate subscription or 'reject' to deny."
-            send_message(ADMIN_TELEGRAM_ID, admin_msg)
-            
-            # Notify user
-            send_message(chat_id, "✅ Payment proof received! Admin will review and activate your subscription shortly.", USER_MAIN_KEYBOARD)
-        
-        else:
-            send_message(chat_id, "Please send a photo or document of your payment receipt.")
-            return
-        
-        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-
-def handle_admin_payment_review(chat_id, message, state):
-    """Handle admin reviewing payment proof"""
-    try:
-        user_id = state['user_id']
-        plan_id = state['plan_id']
-        plan_name = state['plan_name']
-        amount = state['amount']
-        text = message.get('text', '').lower()
-        
-        if text == 'approve':
-            # Create subscription
-            if create_user_subscription(user_id, plan_id, amount):
-                # Notify user
-                user_msg = f"🎉 Subscription Activated!\n\n"
-                user_msg += f"✅ Your {plan_name} subscription has been activated!\n"
-                user_msg += f"💵 Amount: ₹{amount}\n"
-                user_msg += f"📅 Activated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}\n\n"
-                user_msg += "You now have access to premium video files!"
-                send_message(user_id, user_msg)
-                
-                # Notify admin
-                send_message(chat_id, f"✅ Subscription activated for user {user_id}")
-            else:
-                send_message(chat_id, f"❌ Failed to activate subscription for user {user_id}")
-        
-        elif text == 'reject':
-            # Notify user
-            user_msg = f"❌ Payment Rejected\n\n"
-            user_msg += f"Your payment for {plan_name} has been rejected.\n"
-            user_msg += f"Please contact admin if you believe this is an error."
-            send_message(user_id, user_msg)
-            
-            # Notify admin
-            send_message(chat_id, f"❌ Payment rejected for user {user_id}")
-        
-        else:
-            send_message(chat_id, "Send 'approve' to activate or 'reject' to deny.")
-            return
-        
-        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-
-def process_user_media_request(chat_id, user_id, message, step=None):
-    """Process user's media request"""
-    media_id = None
-    media_type = None
-    
-    if 'photo' in message:
-        media_id = message['photo'][-1]['file_id']
-        media_type = 'photo'
-    elif 'video' in message:
-        media_id = message['video']['file_id']
-        media_type = 'video'
-    else:
-        send_message(chat_id, "❌ Please send a photo or video")
-        return
-    
-    # Create request
-    request_doc = create_video_request(
-        user_id=user_id,
-        media_id=media_id,
-        media_type=media_type,
-        message=message
-    )
-    
-    if request_doc:
-        send_message(
-            chat_id,
-            f"✅ Request Submitted!\n\n"
-            f"🆔 Request ID: {request_doc['request_id']}\n"
-            f"📸 Media Type: {media_type}\n\n"
-            f"✅ Your media has been forwarded to admin.\n"
-            f"We'll notify you when we find the matching video!",
-            USER_MAIN_KEYBOARD
-        )
-    else:
-        send_message(chat_id, "❌ Failed to submit request. Please try again.", USER_MAIN_KEYBOARD)
-    
-    USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-
-def handle_stats_command(chat_id):
-    """Handle stats command"""
-    try:
-        stats = {
-            "total_content": 0,
-            "total_requests": 0,
-            "pending_requests": 0,
-            "completed_requests": 0,
-            "total_users": 0,
-            "active_subscribers": 0,
-            "total_revenue": 0,
-            "channels": {}
-        }
-        
-        if content_collection is not None:
-            stats["total_content"] = content_collection.count_documents({})
-            for channel in BROADCAST_CHANNELS:
-                count = content_collection.count_documents({"channel": channel})
-                stats["channels"][channel] = count
-        
-        if requests_collection is not None:
-            stats["total_requests"] = requests_collection.count_documents({})
-            stats["pending_requests"] = requests_collection.count_documents({"status": "pending"})
-            stats["completed_requests"] = requests_collection.count_documents({"status": "completed"})
-        
-        if users_collection is not None:
-            stats["total_users"] = users_collection.count_documents({})
-            stats["active_subscribers"] = users_collection.count_documents({
-                'is_active': True,
-                'expiry_date': {'$gt': datetime.utcnow()}
-            })
-            
-            # Calculate total revenue
-            all_users = list(users_collection.find({}))
-            stats["total_revenue"] = sum(user.get('amount_paid', 0) for user in all_users)
-        
-        message = "📊 System Statistics\n\n"
-        message += f"📁 Total Posts: {stats['total_content']}\n"
-        message += f"📥 Total Requests: {stats['total_requests']}\n"
-        message += f"⏳ Pending Requests: {stats['pending_requests']}\n"
-        message += f"✅ Completed Requests: {stats['completed_requests']}\n"
-        message += f"👥 Total Users: {stats['total_users']}\n"
-        message += f"💰 Active Subscribers: {stats['active_subscribers']}\n"
-        message += f"💵 Total Revenue: ₹{stats['total_revenue']}\n\n"
-        
-        message += "📈 Channel Posts:\n"
-        for channel, count in stats['channels'].items():
-            channel_name = BROADCAST_CHANNELS[channel]['name']
-            message += f"  • {channel_name}: {count}\n"
-        
-        send_message(chat_id, message)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error getting stats: {str(e)}")
-
-# --- CLEANUP OLD STATES FUNCTION ---
-def cleanup_old_states():
-    """Clean up expired user states"""
-    while True:
-        threading.Event().wait(300)  # Check every 5 minutes
-        current_time = time.time()
-        try:
-            expired = [
-                chat_id for chat_id, state in USER_STATE.items()
-                if current_time - state.get('timestamp', 0) > 1800  # 30 minutes
-            ]
-            for chat_id in expired:
-                USER_STATE.pop(chat_id, None)
-            if expired:
-                logger.info(f"Cleaned {len(expired)} expired user states")
-        except Exception as e:
-            logger.error(f"State cleanup error: {e}")
-
 # --- FLASK ROUTES ---
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Telegram webhook handler"""
@@ -1667,46 +1174,28 @@ def index():
     return jsonify({
         "service": PRODUCT_NAME, 
         "status": "online",
-        "bot": f"@{BOT_USERNAME}" if BOT_USERNAME else "Not set",
-        "features": ["telegram_bot", "video_requests", "subscriptions", "multi_channel", "media_forwarding"]
+        "bot": f"@{BOT_USERNAME}" if BOT_USERNAME else "Not set"
     }), 200
 
 @app.route('/health', methods=['GET'])
 def health():
-    status = {"status": "healthy", "service": PRODUCT_NAME}
-    return jsonify(status), 200
+    return jsonify({"status": "healthy"}), 200
 
 # --- BACKGROUND TASKS ---
-
-def flush_views_once():
-    """Flush all pending views to DB"""
-    try:
-        with view_lock:
-            if not view_cache or content_collection is None:
-                return
-            
-            from pymongo import UpdateOne
-            
-            bulk_ops = []
-            for cid, count in view_cache.items():
-                if count > 0 and ObjectId.is_valid(cid):
-                    bulk_ops.append(UpdateOne(
-                        {"_id": ObjectId(cid)},
-                        {"$inc": {"views": count}}
-                    ))
-            
-            if bulk_ops:
-                content_collection.bulk_write(bulk_ops, ordered=False)
-            
-            view_cache.clear()
-    except Exception as e:
-        logger.error(f"Flush error: {e}")
-
-def flush_views_loop():
-    """Periodic view flush loop"""
+def cleanup_old_states():
+    """Clean up expired user states"""
     while True:
-        threading.Event().wait(30)
-        flush_views_once()
+        threading.Event().wait(300)
+        current_time = time.time()
+        try:
+            expired = [
+                chat_id for chat_id, state in USER_STATE.items()
+                if current_time - state.get('timestamp', 0) > 1800
+            ]
+            for chat_id in expired:
+                USER_STATE.pop(chat_id, None)
+        except Exception as e:
+            logger.error(f"State cleanup error: {e}")
 
 def get_bot_info():
     """Get bot username"""
@@ -1724,37 +1213,37 @@ def set_webhook():
         return False
     
     webhook_url = f"{APP_URL.rstrip('/')}/webhook"
-    return send_telegram('setWebhook', {
+    result = send_telegram('setWebhook', {
         'url': webhook_url,
         'max_connections': 5,
         'drop_pending_updates': True
     })
+    
+    if result:
+        logger.info(f"Webhook set successfully to {webhook_url}")
+    else:
+        logger.error("Webhook setup failed")
+    
+    return result
 
 # --- STARTUP ---
-
 if __name__ == '__main__':
     logger.info(f"Starting {PRODUCT_NAME}...")
     
-    init_mongodb()
+    # Initialize MongoDB
+    if not init_mongodb():
+        logger.error("Failed to initialize MongoDB")
     
     # Get bot info
     get_bot_info()
     
     # Start background tasks
-    threading.Thread(target=flush_views_loop, daemon=True).start()
     threading.Thread(target=cleanup_old_states, daemon=True).start()
     
-    # Register shutdown handler
-    atexit.register(flush_views_once)
-    signal.signal(signal.SIGTERM, lambda s, f: flush_views_once())
-    
-    if APP_URL and BOT_TOKEN:
-        if set_webhook():
-            logger.info("Webhook set successfully")
-        else:
-            logger.error("Webhook setup failed")
+    # Set webhook
+    if BOT_TOKEN:
+        set_webhook()
     
     logger.info(f"Starting server on port {PORT}")
     logger.info(f"Bot username: @{BOT_USERNAME if BOT_USERNAME else 'Not set'}")
-    logger.info(f"Payment bot: {PAYMENT_BOT_USERNAME}")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
