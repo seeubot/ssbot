@@ -20,7 +20,7 @@ GROUP_TELEGRAM_ID = -1002541647242  # DiskWala Channel
 TELUGU_GROUP_ID = -1003551789476  # Telugu Channel
 CONTENT_FORWARD_CHANNEL_ID = -1002776780769  # Video Files Channel
 PRODUCT_NAME = "Adult-Hub"
-PAYMENT_BOT_USERNAME = "@seeutech_bot"  # Payment bot username
+PAYMENT_BOT_USERNAME = "@seeutech_bot"
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -61,7 +61,6 @@ def init_mongodb():
         users_collection = db["users"]
         plans_collection = db["plans"]
         
-        # Initialize default plans
         init_default_plans()
         
         logger.info(f"MongoDB connected: {db_name}.{collection_name}")
@@ -155,6 +154,20 @@ def check_user_subscription(user_id):
         logger.error(f"Check subscription error: {e}")
         return False
 
+def get_user_subscription(user_id):
+    """Get user subscription details"""
+    try:
+        if users_collection is None:
+            return None
+            
+        return users_collection.find_one({
+            'user_id': user_id,
+            'is_active': True
+        })
+    except Exception as e:
+        logger.error(f"Get subscription error: {e}")
+        return None
+
 def create_user_subscription(user_id, plan_id, amount_paid):
     """Create new user subscription"""
     try:
@@ -209,13 +222,13 @@ USER_STATE = {}
 # --- KEYBOARDS ---
 ADMIN_MAIN_KEYBOARD = {
     'keyboard': [
-        [{'text': 'DiskWala Posts'}, {'text': 'Telugu Posts'}],
-        [{'text': 'Video Files'}, {'text': '📢 Broadcast'}],
+        [{'text': '📁 DiskWala Posts'}, {'text': '🇮🇳 Telugu Posts'}],
+        [{'text': '🎬 Video Files'}, {'text': '📢 Broadcast'}],
         [{'text': '📥 Video Requests'}, {'text': '📊 Stats'}],
-        [{'text': '💰 Subscriptions'}, {'text': '📋 Plans'}],
-        [{'text': 'Cancel'}]
+        [{'text': '💰 Subscriptions'}, {'text': '📋 Plans'}]
     ],
-    'resize_keyboard': True
+    'resize_keyboard': True,
+    'one_time_keyboard': False
 }
 
 USER_MAIN_KEYBOARD = {
@@ -224,49 +237,56 @@ USER_MAIN_KEYBOARD = {
         [{'text': '🆕 My Requests'}, {'text': '💰 Buy Plan'}],
         [{'text': '❌ Cancel'}]
     ],
-    'resize_keyboard': True
+    'resize_keyboard': True,
+    'one_time_keyboard': False
 }
 
 SUBSCRIBED_USER_KEYBOARD = {
     'keyboard': [
-        [{'text': '📥 Request Video'}, {'text': '🎬 Video Files'}],
+        [{'text': '📥 Request Video'}, {'text': '🎬 My Videos'}],
         [{'text': '🆕 My Requests'}, {'text': '📋 My Plan'}],
         [{'text': '❌ Cancel'}]
     ],
-    'resize_keyboard': True
+    'resize_keyboard': True,
+    'one_time_keyboard': False
 }
 
 CHANNEL_MODE_KEYBOARD = {
     'keyboard': [
-        [{'text': 'Single Post'}, {'text': 'Forward Multiple'}],
-        [{'text': 'Back to Menu'}]
+        [{'text': '✏️ Single Post'}, {'text': '📨 Forward Multiple'}],
+        [{'text': '🔙 Back to Menu'}]
     ],
-    'resize_keyboard': True
+    'resize_keyboard': True,
+    'one_time_keyboard': False
 }
 
 BROADCAST_KEYBOARD = {
     'keyboard': [
         [{'text': '📺 DiskWala'}, {'text': '🇮🇳 Telugu'}],
         [{'text': '🎬 Video Files'}, {'text': '📡 All Channels'}],
-        [{'text': 'Back to Menu'}]
+        [{'text': '🔙 Back to Menu'}]
     ],
-    'resize_keyboard': True
+    'resize_keyboard': True,
+    'one_time_keyboard': False
 }
 
 PLANS_KEYBOARD = {
     'keyboard': [
         [{'text': '2 Weeks - ₹40'}, {'text': '1 Month - ₹50'}],
-        [{'text': '1 Year - ₹200'}, {'text': 'Back to Menu'}]
+        [{'text': '1 Year - ₹200'}],
+        [{'text': '🔙 Back to Menu'}]
     ],
-    'resize_keyboard': True
+    'resize_keyboard': True,
+    'one_time_keyboard': False
 }
 
 REQUESTS_KEYBOARD = {
     'keyboard': [
         [{'text': '📋 Pending Requests'}, {'text': '📊 All Requests'}],
-        [{'text': 'Back to Menu'}]
+        [{'text': '🔙 Back to Menu'}]
     ],
-    'resize_keyboard': True
+    'resize_keyboard': True,
+    'one_time_keyboard': False
 }
 
 REQUEST_MEDIA_KEYBOARD = {
@@ -274,7 +294,8 @@ REQUEST_MEDIA_KEYBOARD = {
         [{'text': '📷 Send Photo'}, {'text': '🎥 Send Video'}],
         [{'text': '❌ Cancel'}]
     ],
-    'resize_keyboard': True
+    'resize_keyboard': True,
+    'one_time_keyboard': False
 }
 
 # --- TELEGRAM FUNCTIONS ---
@@ -284,18 +305,18 @@ def send_telegram(method, payload):
         return False
     
     try:
-        response = requests.post(TELEGRAM_API + method, json=payload, timeout=5)
+        response = requests.post(TELEGRAM_API + method, json=payload, timeout=10)
         response.raise_for_status()
         result = response.json()
         return result.get('result') if result.get('ok') else False
     except Exception as e:
-        logger.error(f"Telegram error: {e}")
+        logger.error(f"Telegram error ({method}): {e}")
         return False
 
 def send_message(chat_id, text, keyboard=None, parse_mode=None):
     payload = {'chat_id': chat_id, 'text': text}
     if keyboard:
-        payload['reply_markup'] = json.dumps(keyboard)
+        payload['reply_markup'] = keyboard
     if parse_mode:
         payload['parse_mode'] = parse_mode
     return send_telegram('sendMessage', payload)
@@ -341,6 +362,19 @@ def send_video(chat_id, video_id, caption=None):
         logger.error(f"Send video error: {e}")
         return False
 
+def forward_message(from_chat_id, to_chat_id, message_id):
+    """Forward a message"""
+    try:
+        payload = {
+            'chat_id': to_chat_id,
+            'from_chat_id': from_chat_id,
+            'message_id': message_id
+        }
+        return send_telegram('forwardMessage', payload)
+    except Exception as e:
+        logger.error(f"Forward message error: {e}")
+        return False
+
 # --- VIDEO REQUEST FUNCTIONS ---
 def create_video_request(user_id, media_id=None, media_type=None, message=None):
     """Create a new video request from user"""
@@ -374,7 +408,6 @@ def create_video_request(user_id, media_id=None, media_type=None, message=None):
             elif media_type == 'video':
                 send_video(ADMIN_TELEGRAM_ID, media_id, caption)
         
-        # Send notification to admin
         notify_admin_new_request(request_doc)
         
         return request_doc
@@ -395,7 +428,7 @@ def notify_admin_new_request(request_doc):
 
 📸 Type: {media_type}
 👤 User ID: {user_id}
-📅 Time: {request_doc['createdAt'].strftime('%H:%M:%S')}
+📅 Time: {request_doc['createdAt'].strftime('%Y-%m-%d %H:%M:%S')}
 ⏳ Status: Pending
 
 Commands:
@@ -403,7 +436,7 @@ Commands:
 /sendmedia {request_id} - Send matching media to user
         """
         
-        send_message(ADMIN_TELEGRAM_ID, message)
+        send_message(ADMIN_TELEGRAM_ID, message.strip())
     except Exception as e:
         logger.error(f"Notify admin error: {e}")
 
@@ -419,29 +452,12 @@ def handle_user_request(chat_id, user_id):
         "📥 Video Request\n\n"
         "Please send a photo or video clip of what you're looking for.\n"
         "We'll forward it to our admin who will find the matching video for you.\n\n"
+        "Use the buttons below or just send your media directly.\n"
         "Type 'Cancel' to abort.",
         REQUEST_MEDIA_KEYBOARD
     )
 
-def handle_request_media(chat_id, user_id, text):
-    """Handle request media type selection"""
-    if text == '📷 Send Photo':
-        USER_STATE[chat_id] = {
-            'step': 'waiting_photo',
-            'user_id': user_id,
-            'timestamp': time.time()
-        }
-        send_message(chat_id, "📷 Please send a photo of the scene/actress you're looking for:")
-        
-    elif text == '🎥 Send Video':
-        USER_STATE[chat_id] = {
-            'step': 'waiting_video',
-            'user_id': user_id,
-            'timestamp': time.time()
-        }
-        send_message(chat_id, "🎥 Please send a video clip of what you're looking for:")
-
-def process_user_media_request(chat_id, user_id, message, step=None):
+def process_user_media_request(chat_id, user_id, message):
     """Process user's media request"""
     media_id = None
     media_type = None
@@ -453,7 +469,7 @@ def process_user_media_request(chat_id, user_id, message, step=None):
         media_id = message['video']['file_id']
         media_type = 'video'
     else:
-        send_message(chat_id, "❌ Please send a photo or video")
+        send_message(chat_id, "❌ Please send a photo or video", REQUEST_MEDIA_KEYBOARD)
         return
     
     # Create request
@@ -464,6 +480,9 @@ def process_user_media_request(chat_id, user_id, message, step=None):
         message=message
     )
     
+    is_subscribed = check_user_subscription(user_id)
+    user_keyboard = SUBSCRIBED_USER_KEYBOARD if is_subscribed else USER_MAIN_KEYBOARD
+    
     if request_doc:
         send_message(
             chat_id,
@@ -472,12 +491,27 @@ def process_user_media_request(chat_id, user_id, message, step=None):
             f"📸 Media Type: {media_type}\n\n"
             f"✅ Your media has been forwarded to admin.\n"
             f"We'll notify you when we find the matching video!",
-            USER_MAIN_KEYBOARD
+            user_keyboard
         )
     else:
-        send_message(chat_id, "❌ Failed to submit request. Please try again.", USER_MAIN_KEYBOARD)
+        send_message(chat_id, "❌ Failed to submit request. Please try again.", user_keyboard)
     
     USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+
+def get_user_requests(user_id, status=None):
+    """Get user's requests"""
+    try:
+        if requests_collection is None:
+            return []
+        
+        query = {'user_id': user_id}
+        if status:
+            query['status'] = status
+        
+        return list(requests_collection.find(query).sort('createdAt', -1).limit(10))
+    except Exception as e:
+        logger.error(f"Get user requests error: {e}")
+        return []
 
 # --- ADMIN COMMAND HANDLERS ---
 def handle_reply_command(chat_id, text):
@@ -491,7 +525,6 @@ def handle_reply_command(chat_id, text):
         request_id = parts[1]
         video_url = parts[2]
         
-        # Find request
         request_doc = requests_collection.find_one({'request_id': request_id})
         if not request_doc:
             send_message(chat_id, f"❌ Request {request_id} not found")
@@ -499,7 +532,6 @@ def handle_reply_command(chat_id, text):
         
         user_id = request_doc['user_id']
         
-        # Send video URL to user
         user_message = f"""
 ✅ Request Completed!
 
@@ -509,9 +541,8 @@ Your request #{request_id} has been fulfilled!
 Thank you for using our service!
         """
         
-        send_message(user_id, user_message)
+        send_message(user_id, user_message.strip())
         
-        # Update request status
         result = requests_collection.update_one(
             {'request_id': request_id},
             {
@@ -536,17 +567,11 @@ def handle_sendmedia_command(chat_id, text):
     try:
         parts = text.split()
         if len(parts) < 2:
-            send_message(chat_id, "Usage: /sendmedia <request_id>")
-            send_message(chat_id, "Then send the matching photo/video you found")
-            USER_STATE[chat_id] = {
-                'step': 'waiting_matching_media',
-                'timestamp': time.time()
-            }
+            send_message(chat_id, "Usage: /sendmedia <request_id>\nThen send the matching photo/video you found")
             return
         
         request_id = parts[1]
         
-        # Find request
         request_doc = requests_collection.find_one({'request_id': request_id})
         if not request_doc:
             send_message(chat_id, f"❌ Request {request_id} not found")
@@ -572,6 +597,7 @@ def handle_admin_matching_media(chat_id, message, state):
         
         media_id = None
         media_type = None
+        caption = ""
         
         if 'photo' in message:
             media_id = message['photo'][-1]['file_id']
@@ -582,11 +608,9 @@ def handle_admin_matching_media(chat_id, message, state):
             media_type = 'video'
             caption = message.get('caption', '')
         elif 'text' in message:
-            # Admin sent text with URL
             user_message = f"✅ Your request #{request_id} has been fulfilled!\n\n🔗 {message['text']}"
             send_message(user_id, user_message)
             
-            # Update request
             requests_collection.update_one(
                 {'request_id': request_id},
                 {
@@ -605,7 +629,6 @@ def handle_admin_matching_media(chat_id, message, state):
             send_message(chat_id, "❌ Please send photo, video, or text with URL")
             return
         
-        # Send matching media to user
         user_caption = f"✅ Your request #{request_id} has been fulfilled!"
         if caption:
             user_caption += f"\n\n{caption}"
@@ -617,7 +640,6 @@ def handle_admin_matching_media(chat_id, message, state):
             success = send_video(user_id, media_id, user_caption)
         
         if success:
-            # Update request
             requests_collection.update_one(
                 {'request_id': request_id},
                 {
@@ -640,108 +662,109 @@ def handle_admin_matching_media(chat_id, message, state):
         USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
 
 # --- ADMIN POSTING FLOW ---
-def handle_admin_posting_flow(chat_id, text, message, state):
-    """Handle admin posting flow"""
-    if text == 'DiskWala Posts':
+def handle_admin_flow(chat_id, text, message, state):
+    """Handle all admin flows"""
+    
+    # Main menu selections
+    if text in ['📁 DiskWala Posts', '🇮🇳 Telugu Posts', '🎬 Video Files']:
+        if text == '📁 DiskWala Posts':
+            channel_type = 'diskwala'
+            channel_id = GROUP_TELEGRAM_ID
+            channel_name = 'DiskWala'
+        elif text == '🇮🇳 Telugu Posts':
+            channel_type = 'telugu'
+            channel_id = TELUGU_GROUP_ID
+            channel_name = 'Telugu'
+        else:  # Video Files
+            channel_type = 'video_files'
+            channel_id = CONTENT_FORWARD_CHANNEL_ID
+            channel_name = 'Video Files'
+        
         USER_STATE[chat_id] = {
             'step': 'channel_mode',
-            'channel_type': 'diskwala',
-            'channel_id': GROUP_TELEGRAM_ID,
-            'channel_name': 'DiskWala',
+            'channel_type': channel_type,
+            'channel_id': channel_id,
+            'channel_name': channel_name,
             'timestamp': time.time()
         }
+        
         send_message(
             chat_id,
-            "📁 DiskWala Posts\n\n"
-            "✏️ Single Post - Create one post\n"
-            "📨 Forward Multiple - Forward directly\n\n"
-            "Choose method:",
+            f"📁 {channel_name} Posts\n\n"
+            "Choose posting method:",
             CHANNEL_MODE_KEYBOARD
         )
         return True
-        
-    elif text == 'Telugu Posts':
-        USER_STATE[chat_id] = {
-            'step': 'channel_mode',
-            'channel_type': 'telugu',
-            'channel_id': TELUGU_GROUP_ID,
-            'channel_name': 'Telugu',
-            'timestamp': time.time()
-        }
-        send_message(
-            chat_id,
-            "🇮🇳 Telugu Posts\n\n"
-            "✏️ Single Post - Create one post\n"
-            "📨 Forward Multiple - Forward directly\n\n"
-            "Choose method:",
-            CHANNEL_MODE_KEYBOARD
-        )
-        return True
-        
-    elif text == 'Video Files':
-        USER_STATE[chat_id] = {'step': 'video_files', 'timestamp': time.time()}
-        send_message(
-            chat_id,
-            "🎬 Video Files Mode\n\n"
-            "Send files one by one.\n"
-            "Type 'Cancel' when done."
-        )
-        return True
-        
+    
     elif text == '📢 Broadcast':
         USER_STATE[chat_id] = {'step': 'broadcast_select', 'timestamp': time.time()}
         send_message(
             chat_id,
             "📢 Broadcast Message\n\n"
-            "Select channel(s) to broadcast:\n\n"
-            "📺 DiskWala - DiskWala channel only\n"
-            "🇮🇳 Telugu - Telugu channel only\n"
-            "🎬 Video Files - Video Files channel only\n"
-            "📡 All Channels - Send to all channels\n\n"
-            "Choose target:",
+            "Select target channel(s):",
             BROADCAST_KEYBOARD
         )
         return True
-        
+    
     elif text == '📥 Video Requests':
         USER_STATE[chat_id] = {'step': 'requests_menu', 'timestamp': time.time()}
         send_message(
             chat_id,
             "📥 Video Requests Management\n\n"
-            "📋 Pending Requests - View pending requests\n"
-            "📊 All Requests - View all requests\n\n"
             "Commands:\n"
             "/reply <id> <url> - Send video URL to user\n"
             "/sendmedia <id> - Send matching media to user",
             REQUESTS_KEYBOARD
         )
         return True
-        
+    
     elif text == '📊 Stats':
         handle_stats_command(chat_id)
+        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
         return True
-        
+    
     elif text == '💰 Subscriptions':
         handle_subscriptions_menu(chat_id)
+        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
         return True
-        
+    
     elif text == '📋 Plans':
         handle_plans_command(chat_id, ADMIN_TELEGRAM_ID)
+        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
         return True
     
-    # Handle channel mode selection
+    # Channel mode selection
     elif state['step'] == 'channel_mode':
-        if text == 'Single Post':
+        if text == '✏️ Single Post':
             USER_STATE[chat_id]['step'] = 'channel_media'
             USER_STATE[chat_id]['data'] = {}
-            send_message(chat_id, f"📤 {state['channel_name']} - Step 1/3: Send thumbnail (photo/video)")
+            send_message(chat_id, f"📤 {state['channel_name']} - Step 1/3\n\nSend thumbnail (photo or video):")
             return True
-        elif text == 'Forward Multiple':
+        elif text == '📨 Forward Multiple':
             USER_STATE[chat_id]['step'] = 'channel_forward'
-            send_message(chat_id, f"📨 Forward messages to {state['channel_name']} channel. Type 'Cancel' when done.")
+            send_message(chat_id, f"📨 Forward messages to me that you want posted to {state['channel_name']}.\n\nType 'Done' when finished.")
             return True
     
-    # Handle channel media
+    # Channel forward mode
+    elif state['step'] == 'channel_forward':
+        if text.lower() == 'done':
+            send_message(chat_id, "✅ Forwarding complete!", ADMIN_MAIN_KEYBOARD)
+            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+            return True
+        
+        # Forward the message to the channel
+        channel_id = state.get('channel_id', GROUP_TELEGRAM_ID)
+        message_id = message.get('message_id')
+        
+        if message_id:
+            result = forward_message(chat_id, channel_id, message_id)
+            if result:
+                send_message(chat_id, "✅ Message forwarded!")
+            else:
+                send_message(chat_id, "❌ Failed to forward message")
+        return True
+    
+    # Channel media
     elif state['step'] == 'channel_media':
         if 'video' in message:
             media_id = message['video']['file_id']
@@ -750,30 +773,30 @@ def handle_admin_posting_flow(chat_id, text, message, state):
             media_id = message['photo'][-1]['file_id']
             media_type = 'photo'
         else:
-            send_message(chat_id, "❌ Send photo or video")
+            send_message(chat_id, "❌ Please send a photo or video")
             return True
         
         USER_STATE[chat_id]['data'] = {
-            'telegram_media_id': media_id, 
+            'telegram_media_id': media_id,
             'media_type': media_type
         }
         USER_STATE[chat_id]['step'] = 'channel_title'
-        send_message(chat_id, f"✅ {media_type.title()} saved!\n\nStep 2/3: Send title")
+        send_message(chat_id, f"✅ {media_type.title()} saved!\n\nStep 2/3: Send the title:")
         return True
     
-    # Handle channel title
+    # Channel title
     elif state['step'] == 'channel_title':
         USER_STATE[chat_id]['data']['title'] = text.strip()
         USER_STATE[chat_id]['step'] = 'channel_urls'
-        send_message(chat_id, "✅ Title saved!\n\nStep 3/3: Send URLs (one per line)")
+        send_message(chat_id, "✅ Title saved!\n\nStep 3/3: Send URLs (one per line):")
         return True
     
-    # Handle channel URLs
+    # Channel URLs
     elif state['step'] == 'channel_urls':
         urls = [url.strip() for url in text.strip().split('\n') if url.strip()]
         
         if not urls:
-            send_message(chat_id, "❌ Send valid URLs")
+            send_message(chat_id, "❌ Please send valid URLs")
             return True
         
         title = state['data']['title']
@@ -814,25 +837,23 @@ def handle_admin_posting_flow(chat_id, text, message, state):
                 send_message(chat_id, msg, ADMIN_MAIN_KEYBOARD)
             except Exception as e:
                 logger.error(f"Save content error: {e}")
-                send_message(chat_id, f"✅ Posted to {channel_name} but failed to save to database")
+                send_message(chat_id, f"✅ Posted to {channel_name} but failed to save to database", ADMIN_MAIN_KEYBOARD)
         else:
             send_message(chat_id, f"❌ Failed to post to {channel_name}", ADMIN_MAIN_KEYBOARD)
         
         USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
         return True
     
-    # Handle requests menu
+    # Requests menu
     elif state['step'] == 'requests_menu':
         if text == '📋 Pending Requests':
             handle_requests_command(chat_id)
-            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
             return True
         elif text == '📊 All Requests':
             handle_all_requests_command(chat_id)
-            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
             return True
     
-    # Handle broadcast select
+    # Broadcast select
     elif state['step'] == 'broadcast_select':
         channel_map = {
             '📺 DiskWala': ['diskwala'],
@@ -847,10 +868,10 @@ def handle_admin_posting_flow(chat_id, text, message, state):
                 'channels': channel_map[text],
                 'timestamp': time.time()
             }
-            send_message(chat_id, f"✅ Selected channels\n\nNow send your broadcast message (text or media with caption)")
+            send_message(chat_id, f"✅ Target selected\n\nNow send your broadcast message (text, photo, or video with caption):")
             return True
     
-    # Handle broadcast content
+    # Broadcast content
     elif state['step'] == 'broadcast_content':
         channels = state['channels']
         broadcast_text = text
@@ -866,34 +887,61 @@ def handle_admin_posting_flow(chat_id, text, message, state):
             media_type = 'video'
             broadcast_text = message.get('caption', '')
         
-        # Simple broadcast implementation
         channel_ids = {
             'diskwala': GROUP_TELEGRAM_ID,
             'telugu': TELUGU_GROUP_ID,
             'video_files': CONTENT_FORWARD_CHANNEL_ID
         }
         
+        success_count = 0
         for channel_key in channels:
             channel_id = channel_ids.get(channel_key)
             if channel_id:
                 if media_id and media_type:
                     if media_type == 'photo':
-                        send_photo(channel_id, media_id, broadcast_text)
+                        if send_photo(channel_id, media_id, broadcast_text):
+                            success_count += 1
                     else:
-                        send_video(channel_id, media_id, broadcast_text)
+                        if send_video(channel_id, media_id, broadcast_text):
+                            success_count += 1
                 else:
-                    send_message(channel_id, broadcast_text)
+                    if send_message(channel_id, broadcast_text):
+                        success_count += 1
         
-        send_message(chat_id, f"✅ Broadcast sent to {len(channels)} channel(s)", ADMIN_MAIN_KEYBOARD)
+        send_message(chat_id, f"✅ Broadcast sent to {success_count}/{len(channels)} channel(s)", ADMIN_MAIN_KEYBOARD)
         USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
         return True
     
     return False
 
-# --- SUBSCRIPTION HANDLERS ---
 def handle_subscriptions_menu(chat_id):
     """Handle subscriptions menu"""
-    send_message(chat_id, "💰 Subscription Management\n\nComing soon...", ADMIN_MAIN_KEYBOARD)
+    try:
+        if users_collection is None:
+            send_message(chat_id, "Database not available", ADMIN_MAIN_KEYBOARD)
+            return
+        
+        total_users = users_collection.count_documents({})
+        active_subs = users_collection.count_documents({
+            'is_active': True,
+            'expiry_date': {'$gt': datetime.utcnow()}
+        })
+        expired_subs = users_collection.count_documents({
+            'expiry_date': {'$lt': datetime.utcnow()}
+        })
+        
+        message = f"""
+💰 Subscription Statistics
+
+👥 Total Users: {total_users}
+✅ Active Subscriptions: {active_subs}
+❌ Expired Subscriptions: {expired_subs}
+        """
+        
+        send_message(chat_id, message.strip(), ADMIN_MAIN_KEYBOARD)
+        
+    except Exception as e:
+        send_message(chat_id, f"Error: {str(e)}", ADMIN_MAIN_KEYBOARD)
 
 def handle_plans_command(chat_id, user_id):
     """Show subscription plans"""
@@ -917,18 +965,19 @@ def handle_plans_command(chat_id, user_id):
             message += f"⏳ Duration: {plan['duration_days']} days\n"
             message += f"📝 {plan.get('description', '')}\n\n"
         
-        message += f"To purchase, message: {PAYMENT_BOT_USERNAME}\n"
-        message += "After payment, send receipt to this bot with command:\n"
+        message += f"💳 To purchase, contact: {PAYMENT_BOT_USERNAME}\n"
+        message += "After payment, send receipt with command:\n"
         message += "/paid <plan_name> <amount>\n\n"
         message += "Example: /paid \"1 Month\" 50"
         
-        send_message(chat_id, message, PLANS_KEYBOARD)
+        keyboard = PLANS_KEYBOARD if is_admin(user_id) else None
+        send_message(chat_id, message, keyboard)
         
     except Exception as e:
         send_message(chat_id, f"Error: {str(e)}")
 
 def handle_requests_command(chat_id):
-    """Handle /requests command to show pending requests"""
+    """Handle pending requests view"""
     try:
         if requests_collection is None:
             send_message(chat_id, "Database not available")
@@ -937,7 +986,7 @@ def handle_requests_command(chat_id):
         pending = list(requests_collection.find({'status': 'pending'}).sort('createdAt', -1).limit(10))
         
         if not pending:
-            send_message(chat_id, "No pending requests")
+            send_message(chat_id, "📋 No pending requests")
             return
         
         message = "📋 Pending Requests:\n\n"
@@ -947,6 +996,7 @@ def handle_requests_command(chat_id):
             message += f"📸 Type: {req.get('media_type', 'Unknown')}\n"
             message += f"📅 {req['createdAt'].strftime('%Y-%m-%d %H:%M')}\n\n"
         
+        message += "\nUse /reply or /sendmedia to respond"
         send_message(chat_id, message)
         
     except Exception as e:
@@ -962,10 +1012,10 @@ def handle_all_requests_command(chat_id):
         all_requests = list(requests_collection.find().sort('createdAt', -1).limit(20))
         
         if not all_requests:
-            send_message(chat_id, "No requests found")
+            send_message(chat_id, "📊 No requests found")
             return
         
-        message = "📊 All Requests:\n\n"
+        message = "📊 Recent Requests:\n\n"
         for req in all_requests:
             status_emoji = "✅" if req['status'] == 'completed' else "⏳"
             message += f"{status_emoji} {req['request_id']} - {req['status']}\n"
@@ -985,6 +1035,8 @@ def handle_stats_command(chat_id):
             "total_requests": 0,
             "pending_requests": 0,
             "completed_requests": 0,
+            "total_users": 0,
+            "active_subs": 0,
             "channels": {
                 'diskwala': 0,
                 'telugu': 0,
@@ -1003,11 +1055,22 @@ def handle_stats_command(chat_id):
             stats["pending_requests"] = requests_collection.count_documents({"status": "pending"})
             stats["completed_requests"] = requests_collection.count_documents({"status": "completed"})
         
+        if users_collection is not None:
+            stats["total_users"] = users_collection.count_documents({})
+            stats["active_subs"] = users_collection.count_documents({
+                'is_active': True,
+                'expiry_date': {'$gt': datetime.utcnow()}
+            })
+        
         message = "📊 System Statistics\n\n"
         message += f"📁 Total Posts: {stats['total_content']}\n"
         message += f"📥 Total Requests: {stats['total_requests']}\n"
-        message += f"⏳ Pending Requests: {stats['pending_requests']}\n"
-        message += f"✅ Completed Requests: {stats['completed_requests']}\n\n"
+        message += f"⏳ Pending: {stats['pending_requests']}\n"
+        message += f"✅ Completed: {stats['completed_requests']}\n\n"
+        
+        message += "👥 Users:\n"
+        message += f"  • Total: {stats['total_users']}\n"
+        message += f"  • Active Subs: {stats['active_subs']}\n\n"
         
         message += "📈 Channel Posts:\n"
         message += f"  • DiskWala: {stats['channels']['diskwala']}\n"
@@ -1018,6 +1081,62 @@ def handle_stats_command(chat_id):
         
     except Exception as e:
         send_message(chat_id, f"Error getting stats: {str(e)}")
+
+def handle_my_requests_command(chat_id, user_id):
+    """Show user's own requests"""
+    try:
+        requests = get_user_requests(user_id)
+        
+        if not requests:
+            send_message(chat_id, "🆕 You have no requests yet.\n\nUse '📥 Request Video' to submit a request.")
+            return
+        
+        message = "🆕 Your Requests:\n\n"
+        for req in requests:
+            status_emoji = "✅" if req['status'] == 'completed' else "⏳"
+            message += f"{status_emoji} {req['request_id']} - {req['status'].title()}\n"
+            message += f"📅 {req['createdAt'].strftime('%Y-%m-%d %H:%M')}\n"
+            
+            if req['status'] == 'completed' and req.get('video_result'):
+                message += f"🎬 Result: {req['video_result'][:50]}...\n"
+            
+            message += "\n"
+        
+        send_message(chat_id, message)
+        
+    except Exception as e:
+        send_message(chat_id, f"Error: {str(e)}")
+
+def handle_my_plan_command(chat_id, user_id):
+    """Show user's subscription plan"""
+    try:
+        subscription = get_user_subscription(user_id)
+        
+        if not subscription:
+            message = "❌ You don't have an active subscription.\n\n"
+            message += "Use '💰 Buy Plan' to purchase a subscription and get direct access to all video files!"
+            send_message(chat_id, message)
+            return
+        
+        is_active = subscription.get('is_active', False) and subscription.get('expiry_date', datetime.min) > datetime.utcnow()
+        
+        message = "📋 Your Subscription Plan\n\n"
+        message += f"📦 Plan: {subscription['plan_name']}\n"
+        message += f"💵 Amount Paid: ₹{subscription['amount_paid']}\n"
+        message += f"📅 Purchase Date: {subscription['purchase_date'].strftime('%Y-%m-%d')}\n"
+        message += f"⏰ Expiry Date: {subscription['expiry_date'].strftime('%Y-%m-%d')}\n"
+        
+        if is_active:
+            days_left = (subscription['expiry_date'] - datetime.utcnow()).days
+            message += f"✅ Status: Active ({days_left} days left)\n"
+        else:
+            message += "❌ Status: Expired\n"
+            message += "\nUse '💰 Buy Plan' to renew your subscription!"
+        
+        send_message(chat_id, message)
+        
+    except Exception as e:
+        send_message(chat_id, f"Error: {str(e)}")
 
 # --- MAIN UPDATE HANDLER ---
 def process_update(update):
@@ -1030,16 +1149,13 @@ def process_update(update):
         text = message.get('text', '').strip()
         user_id = message['from']['id']
         
-        # Check if user is admin
         admin = is_admin(user_id)
-        
-        # Check user subscription status for keyboard
         is_subscribed = check_user_subscription(user_id)
         user_keyboard = SUBSCRIBED_USER_KEYBOARD if is_subscribed else USER_MAIN_KEYBOARD
         
-        logger.info(f"Processing update - Chat: {chat_id}, User: {user_id}, Text: '{text}', Admin: {admin}")
+        logger.info(f"Update - Chat: {chat_id}, User: {user_id}, Text: '{text[:50]}', Admin: {admin}")
         
-        # Handle start command
+        # Handle /start command
         if text.startswith('/start'):
             params = text.split()
             if len(params) > 1 and params[1] == 'request':
@@ -1049,37 +1165,36 @@ def process_update(update):
             if admin:
                 send_message(
                     chat_id,
-                    f"🚀 {PRODUCT_NAME} Admin Bot\n\n"
-                    f"Choose an option:",
+                    f"🚀 {PRODUCT_NAME} Admin Panel\n\nSelect an option:",
                     ADMIN_MAIN_KEYBOARD
                 )
             else:
                 welcome_msg = f"👋 Welcome to {PRODUCT_NAME}!\n\n"
                 if is_subscribed:
-                    welcome_msg += "✅ You have an active subscription!\n\n"
-                    welcome_msg += "Choose an option:"
+                    welcome_msg += "✅ You have an active subscription!\n"
+                    welcome_msg += "Access all video files directly without ads.\n\n"
                 else:
-                    welcome_msg += "Choose an option:"
+                    welcome_msg += "Request videos or purchase a plan for direct access!\n\n"
                 
+                welcome_msg += "Select an option:"
                 send_message(chat_id, welcome_msg, user_keyboard)
             
             USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
             return
         
-        # Handle menu commands
-        if text in ['Back to Menu', 'Cancel', '❌ Cancel', 'Back']:
+        # Handle back/cancel buttons
+        if text in ['🔙 Back to Menu', 'Back to Menu', 'Cancel', '❌ Cancel', 'Back']:
             USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-            if admin:
-                send_message(chat_id, "Back to main menu:", ADMIN_MAIN_KEYBOARD)
-            else:
-                send_message(chat_id, "Back to main menu:", user_keyboard)
+            keyboard = ADMIN_MAIN_KEYBOARD if admin else user_keyboard
+            send_message(chat_id, "📱 Main Menu:", keyboard)
             return
+        
+        # Get user state
+        state = USER_STATE.get(chat_id, {'step': 'main', 'timestamp': time.time()})
         
         # --- ADMIN FLOW ---
         if admin:
-            state = USER_STATE.get(chat_id, {'step': 'main', 'timestamp': time.time()})
-            
-            # Handle admin commands
+            # Admin commands
             if text.startswith('/reply'):
                 handle_reply_command(chat_id, text)
                 return
@@ -1092,64 +1207,85 @@ def process_update(update):
                 handle_admin_matching_media(chat_id, message, state)
                 return
             
-            # Try admin posting flow
-            if handle_admin_posting_flow(chat_id, text, message, state):
+            # Try admin flow handlers
+            if handle_admin_flow(chat_id, text, message, state):
                 return
             
-            # If no handler matched, show menu
+            # Default: show menu
             send_message(chat_id, "Please select an option:", ADMIN_MAIN_KEYBOARD)
+            return
         
         # --- USER FLOW ---
-        else:
-            state = USER_STATE.get(chat_id, {'step': 'main', 'timestamp': time.time()})
-            
-            # Handle /plans command
-            if text == '/plans' or text == '💰 Buy Plan':
-                handle_plans_command(chat_id, user_id)
-                return
-            
-            # User menu options
-            if text == '📥 Request Video':
-                handle_user_request(chat_id, user_id)
-                return
-            
-            # User request media selection
-            elif state['step'] == 'request_media':
-                if text in ['📷 Send Photo', '🎥 Send Video']:
-                    handle_request_media(chat_id, user_id, text)
+        
+        # User commands
+        if text == '/plans' or text == '💰 Buy Plan':
+            handle_plans_command(chat_id, user_id)
+            return
+        
+        # User menu options
+        if text == '📥 Request Video':
+            handle_user_request(chat_id, user_id)
+            return
+        
+        elif text == '🆕 My Requests':
+            handle_my_requests_command(chat_id, user_id)
+            return
+        
+        elif text == '📋 My Plan':
+            handle_my_plan_command(chat_id, user_id)
+            return
+        
+        elif text == '🎬 My Videos' or text == '🎬 Video Files':
+            if is_subscribed:
+                send_message(chat_id, "🎬 Video Files\n\nAccess the Video Files channel for all content!", user_keyboard)
+            else:
+                send_message(chat_id, "❌ This feature requires an active subscription.\n\nUse '💰 Buy Plan' to get access!", user_keyboard)
+            return
+        
+        # Handle request flow
+        if state['step'] == 'request_media':
+            if text in ['📷 Send Photo', '🎥 Send Video']:
+                if text == '📷 Send Photo':
+                    USER_STATE[chat_id] = {
+                        'step': 'waiting_photo',
+                        'user_id': user_id,
+                        'timestamp': time.time()
+                    }
+                    send_message(chat_id, "📷 Please send a photo of the scene you're looking for:")
                 else:
-                    send_message(chat_id, "Please select an option:", REQUEST_MEDIA_KEYBOARD)
+                    USER_STATE[chat_id] = {
+                        'step': 'waiting_video',
+                        'user_id': user_id,
+                        'timestamp': time.time()
+                    }
+                    send_message(chat_id, "🎥 Please send a video clip of what you're looking for:")
                 return
-            
-            # Handle user sending media
-            elif state['step'] in ['waiting_photo', 'waiting_video']:
-                if state['step'] == 'waiting_photo' and 'photo' not in message:
-                    send_message(chat_id, "Please send a photo or select 'Cancel'")
-                    return
-                
-                if state['step'] == 'waiting_video' and 'video' not in message:
-                    send_message(chat_id, "Please send a video or select 'Cancel'")
-                    return
-                
-                process_user_media_request(chat_id, user_id, message, state['step'])
-                return
-            
-            # Handle user sending media directly
-            elif ('photo' in message or 'video' in message) and state['step'] == 'main':
+            elif 'photo' in message or 'video' in message:
                 process_user_media_request(chat_id, user_id, message)
                 return
-            
-            # If no handler matched, show menu
-            send_message(chat_id, "Please select an option:", user_keyboard)
+        
+        # Handle waiting for media
+        elif state['step'] in ['waiting_photo', 'waiting_video']:
+            if 'photo' in message or 'video' in message:
+                process_user_media_request(chat_id, user_id, message)
+                return
+            else:
+                send_message(chat_id, "❌ Please send a photo or video, or select 'Cancel'")
+                return
+        
+        # Handle direct media send
+        elif ('photo' in message or 'video' in message) and state['step'] in ['main', 'request_media']:
+            process_user_media_request(chat_id, user_id, message)
+            return
+        
+        # Default: show menu
+        send_message(chat_id, "Please select an option:", user_keyboard)
         
     except Exception as e:
         logger.error(f"Process error: {e}", exc_info=True)
         try:
-            if chat_id:
-                if is_admin(chat_id):
-                    send_message(chat_id, "🚨 Error occurred. Please try again.", ADMIN_MAIN_KEYBOARD)
-                else:
-                    send_message(chat_id, "🚨 Error occurred. Please try again.", USER_MAIN_KEYBOARD)
+            keyboard = ADMIN_MAIN_KEYBOARD if is_admin(user_id) else USER_MAIN_KEYBOARD
+            send_message(chat_id, "🚨 An error occurred. Please try again.", keyboard)
         except:
             pass
 
@@ -1172,14 +1308,14 @@ def webhook():
 @app.route('/', methods=['GET'])
 def index():
     return jsonify({
-        "service": PRODUCT_NAME, 
+        "service": PRODUCT_NAME,
         "status": "online",
-        "bot": f"@{BOT_USERNAME}" if BOT_USERNAME else "Not set"
+        "bot": f"@{BOT_USERNAME}" if BOT_USERNAME else "Not configured"
     }), 200
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "healthy"}), 200
+    return jsonify({"status": "healthy", "timestamp": datetime.utcnow().isoformat()}), 200
 
 # --- BACKGROUND TASKS ---
 def cleanup_old_states():
@@ -1189,11 +1325,14 @@ def cleanup_old_states():
         current_time = time.time()
         try:
             expired = [
-                chat_id for chat_id, state in USER_STATE.items()
+                chat_id for chat_id, state in list(USER_STATE.items())
                 if current_time - state.get('timestamp', 0) > 1800
             ]
             for chat_id in expired:
                 USER_STATE.pop(chat_id, None)
+            
+            if expired:
+                logger.info(f"Cleaned up {len(expired)} expired states")
         except Exception as e:
             logger.error(f"State cleanup error: {e}")
 
@@ -1205,11 +1344,15 @@ def get_bot_info():
         if result:
             BOT_USERNAME = result.get('username')
             logger.info(f"Bot username: @{BOT_USERNAME}")
+            return True
     except Exception as e:
         logger.error(f"Get bot info error: {e}")
+    return False
 
 def set_webhook():
+    """Set webhook for the bot"""
     if not APP_URL or not BOT_TOKEN:
+        logger.error("APP_URL or BOT_TOKEN not configured")
         return False
     
     webhook_url = f"{APP_URL.rstrip('/')}/webhook"
@@ -1220,30 +1363,38 @@ def set_webhook():
     })
     
     if result:
-        logger.info(f"Webhook set successfully to {webhook_url}")
+        logger.info(f"✅ Webhook set: {webhook_url}")
+        return True
     else:
-        logger.error("Webhook setup failed")
-    
-    return result
+        logger.error("❌ Webhook setup failed")
+        return False
 
 # --- STARTUP ---
 if __name__ == '__main__':
-    logger.info(f"Starting {PRODUCT_NAME}...")
+    logger.info(f"🚀 Starting {PRODUCT_NAME}...")
     
     # Initialize MongoDB
     if not init_mongodb():
-        logger.error("Failed to initialize MongoDB")
+        logger.error("❌ MongoDB initialization failed")
+    else:
+        logger.info("✅ MongoDB connected")
     
     # Get bot info
-    get_bot_info()
+    if get_bot_info():
+        logger.info(f"✅ Bot ready: @{BOT_USERNAME}")
+    else:
+        logger.warning("⚠️ Could not get bot info")
     
     # Start background tasks
     threading.Thread(target=cleanup_old_states, daemon=True).start()
+    logger.info("✅ Background tasks started")
     
     # Set webhook
-    if BOT_TOKEN:
+    if BOT_TOKEN and APP_URL:
         set_webhook()
+    else:
+        logger.warning("⚠️ Webhook not configured - missing BOT_TOKEN or APP_URL")
     
-    logger.info(f"Starting server on port {PORT}")
-    logger.info(f"Bot username: @{BOT_USERNAME if BOT_USERNAME else 'Not set'}")
-    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+    logger.info(f"🌐 Starting server on port {PORT}")
+    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)title']
+        media_id = state['data']['
