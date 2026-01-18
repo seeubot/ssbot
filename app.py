@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import logging
 import threading
 import time
+import re
 
 # --- CONSTANTS & CONFIGURATION ---
 ADMIN_TELEGRAM_ID = 1352497419
@@ -57,7 +58,7 @@ def init_mongodb():
         post_counter_collection = db["post_counters"]
         users_collection = db["users"]
         plans_collection = db["plans"]
-        payments_collection = db["pending_payments"]  # New collection for pending payments
+        payments_collection = db["pending_payments"]
         
         init_default_plans()
         
@@ -271,15 +272,6 @@ REQUEST_MEDIA_KEYBOARD = {
     'one_time_keyboard': False
 }
 
-ADMIN_PAYMENT_ACTIONS_KEYBOARD = {
-    'inline_keyboard': [
-        [
-            {'text': '✅ Approve', 'callback_data': 'approve_payment'},
-            {'text': '❌ Reject', 'callback_data': 'reject_payment'}
-        ]
-    ]
-}
-
 # --- TELEGRAM FUNCTIONS ---
 def send_telegram(method, payload):
     if not TELEGRAM_API:
@@ -310,43 +302,58 @@ def send_media_post(title, media_id, media_type, links, channel_id, channel_name
     if not TELEGRAM_API:
         return False
 
-    bot_url = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "Contact Admin"
-    
     # Create download links section
-    link_text = "📥 Download Links/👀 Watch Online\n\n"
+    link_text = ""
     for i, link in enumerate(links, 1):
         link_text += f"{i}. {link.get('episode_title', 'Link')}: {link['url']}\n"
     
     post_number_text = f"#{post_number} " if post_number else ""
     
-    # Add Request Video button in post caption
-    request_button_text = f"\n\n📥 Request Video: @{BOT_USERNAME}?start=request"
+    # FIXED: Proper video request button with inline keyboard
+    inline_keyboard = {
+        'inline_keyboard': [
+            [
+                {'text': '📥 Request Video', 'url': f'https://t.me/{BOT_USERNAME}?start=request'}
+            ]
+        ]
+    }
     
-    # Improved caption format
-    caption = f"{post_number_text}🔥 {title} 🔥\n\n{link_text}\n━━━━━━━━━━━━━━━━━\n{request_button_text}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
+    # Default title format (as requested - no step 2 for title)
+    caption = f"{post_number_text}🔥 {title} 🔥\n\n📥 Download Links/👀 Watch Online\n\n{link_text}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
     
     method = 'sendPhoto' if media_type == 'photo' else 'sendVideo'
     key = 'photo' if media_type == 'photo' else 'video'
     
-    return send_telegram(method, {'chat_id': channel_id, key: media_id, 'caption': caption})
+    payload = {
+        'chat_id': channel_id, 
+        key: media_id, 
+        'caption': caption,
+        'reply_markup': inline_keyboard
+    }
+    
+    return send_telegram(method, payload)
 
-def send_photo(chat_id, photo_id, caption=None):
+def send_photo(chat_id, photo_id, caption=None, reply_markup=None):
     """Send photo by file_id"""
     try:
         payload = {'chat_id': chat_id, 'photo': photo_id}
         if caption:
             payload['caption'] = caption
+        if reply_markup:
+            payload['reply_markup'] = reply_markup
         return send_telegram('sendPhoto', payload)
     except Exception as e:
         logger.error(f"Send photo error: {e}")
         return False
 
-def send_video(chat_id, video_id, caption=None):
+def send_video(chat_id, video_id, caption=None, reply_markup=None):
     """Send video by file_id"""
     try:
         payload = {'chat_id': chat_id, 'video': video_id}
         if caption:
             payload['caption'] = caption
+        if reply_markup:
+            payload['reply_markup'] = reply_markup
         return send_telegram('sendVideo', payload)
     except Exception as e:
         logger.error(f"Send video error: {e}")
@@ -391,6 +398,20 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False):
         logger.error(f"Answer callback error: {e}")
         return False
 
+def edit_message_reply_markup(chat_id, message_id, reply_markup=None):
+    """Edit message reply markup"""
+    try:
+        payload = {
+            'chat_id': chat_id,
+            'message_id': message_id
+        }
+        if reply_markup:
+            payload['reply_markup'] = reply_markup
+        return send_telegram('editMessageReplyMarkup', payload)
+    except Exception as e:
+        logger.error(f"Edit message reply markup error: {e}")
+        return False
+
 # --- PAYMENT & SUBSCRIPTION FUNCTIONS ---
 def create_payment_request(user_id, plan_name, amount):
     """Create a new payment request"""
@@ -431,6 +452,16 @@ def notify_admin_new_payment(payment_doc):
         plan_name = payment_doc['plan_name']
         amount = payment_doc['amount']
         
+        # FIXED: Create inline keyboard with payment_id in callback data
+        inline_keyboard = {
+            'inline_keyboard': [
+                [
+                    {'text': '✅ Approve', 'callback_data': f'approve_{payment_id}'},
+                    {'text': '❌ Reject', 'callback_data': f'reject_{payment_id}'}
+                ]
+            ]
+        }
+        
         message = f"""
 💰 New Payment Request #{payment_id}
 
@@ -447,13 +478,13 @@ Click buttons below to approve/reject:
         send_message(
             ADMIN_TELEGRAM_ID,
             message.strip(),
-            reply_markup=ADMIN_PAYMENT_ACTIONS_KEYBOARD
+            reply_markup=inline_keyboard
         )
         
     except Exception as e:
         logger.error(f"Notify admin error: {e}")
 
-def approve_payment(payment_id):
+def approve_payment(payment_id, admin_id):
     """Approve a payment and activate subscription"""
     try:
         payment = payments_collection.find_one({'payment_id': payment_id})
@@ -480,6 +511,7 @@ def approve_payment(payment_id):
             'purchase_date': datetime.utcnow(),
             'expiry_date': expiry_date,
             'is_active': True,
+            'approved_by': admin_id,
             'created_at': datetime.utcnow()
         }
         
@@ -496,6 +528,7 @@ def approve_payment(payment_id):
                 '$set': {
                     'status': 'approved',
                     'approved_at': datetime.utcnow(),
+                    'approved_by': admin_id,
                     'updated_at': datetime.utcnow()
                 }
             }
@@ -523,7 +556,7 @@ Use the '🎬 My Videos' option to browse content.
         logger.error(f"Approve payment error: {e}")
         return False, str(e)
 
-def reject_payment(payment_id, reason="Payment verification failed"):
+def reject_payment(payment_id, admin_id, reason="Payment verification failed"):
     """Reject a payment request"""
     try:
         payment = payments_collection.find_one({'payment_id': payment_id})
@@ -537,6 +570,7 @@ def reject_payment(payment_id, reason="Payment verification failed"):
                     'status': 'rejected',
                     'rejection_reason': reason,
                     'rejected_at': datetime.utcnow(),
+                    'rejected_by': admin_id,
                     'updated_at': datetime.utcnow()
                 }
             }
@@ -948,7 +982,7 @@ def handle_admin_flow(chat_id, text, message, state):
         if text == '✏️ Single Post':
             USER_STATE[chat_id]['step'] = 'channel_media'
             USER_STATE[chat_id]['data'] = {}
-            send_message(chat_id, f"📤 {state['channel_name']} - Step 1/3\n\nSend thumbnail (photo or video):")
+            send_message(chat_id, f"📤 {state['channel_name']} - Step 1/2\n\nSend thumbnail (photo or video):")
             return True
         elif text == '📨 Forward Multiple':
             USER_STATE[chat_id]['step'] = 'channel_forward'
@@ -981,7 +1015,7 @@ def handle_admin_flow(chat_id, text, message, state):
                 send_message(chat_id, "❌ Failed to forward message")
         return True
     
-    # Channel media
+    # Channel media - REMOVED TITLE STEP as requested
     elif state.get('step') == 'channel_media':
         if 'video' in message:
             media_id = message['video']['file_id']
@@ -993,27 +1027,17 @@ def handle_admin_flow(chat_id, text, message, state):
             send_message(chat_id, "❌ Please send a photo or video")
             return True
         
+        # Store media info and move directly to URLs (skip title step)
         USER_STATE[chat_id]['data'] = {
             'telegram_media_id': media_id,
-            'media_type': media_type
+            'media_type': media_type,
+            'title': "Movie / Content Title"  # Default title
         }
-        USER_STATE[chat_id]['step'] = 'channel_title'
-        
-        # Use the new title format
-        send_message(chat_id, f"✅ {media_type.title()} saved!\n\nStep 2/3: Send the title (e.g., 'Movie Name 2024'):")
+        USER_STATE[chat_id]['step'] = 'channel_urls'  # Skip title step
+        send_message(chat_id, f"✅ {media_type.title()} saved!\n\nSend URLs (one per line):")
         return True
     
-    # Channel title
-    elif state.get('step') == 'channel_title':
-        # Prepend the standard title format
-        formatted_title = f"📥 Download Links/👀 Watch Online\n\nOpen in Diskwala App 👇\n\n{text.strip()}"
-        
-        USER_STATE[chat_id]['data']['title'] = formatted_title
-        USER_STATE[chat_id]['step'] = 'channel_urls'
-        send_message(chat_id, "✅ Title saved!\n\nStep 3/3: Send URLs (one per line):")
-        return True
-    
-    # Channel URLs
+    # Channel URLs (now step 2/2 instead of 3/3)
     elif state.get('step') == 'channel_urls':
         urls = [url.strip() for url in text.strip().split('\n') if url.strip()]
         
@@ -1021,7 +1045,7 @@ def handle_admin_flow(chat_id, text, message, state):
             send_message(chat_id, "❌ Please send valid URLs")
             return True
         
-        title = state['data']['title']
+        title = state['data']['title']  # Using default title
         media_id = state['data']['telegram_media_id']
         media_type = state['data']['media_type']
         channel_id_target = state.get('channel_id', GROUP_TELEGRAM_ID)
@@ -1051,7 +1075,7 @@ def handle_admin_flow(chat_id, text, message, state):
                     "tags": title.lower().split(),
                     "links": links,
                     "views": 0,
-                    "created_at": datetime.utcnow()
+                    "created_at': datetime.utcnow()
                 }
                 content_collection.insert_one(content_data)
                 
@@ -1410,6 +1434,9 @@ def handle_stats_command(chat_id):
             for user in active_users:
                 stats["total_revenue"] += user.get('amount_paid', 0)
         
+        pending_payments = 0
+        approved_payments = 0
+        
         if payments_collection is not None:
             pending_payments = payments_collection.count_documents({'status': 'pending'})
             approved_payments = payments_collection.count_documents({'status': 'approved'})
@@ -1629,66 +1656,57 @@ def handle_callback_query(callback_query):
         message = callback_query.get('message', {})
         chat_id = message.get('chat', {}).get('id')
         message_id = message.get('message_id')
+        from_user = callback_query.get('from', {})
+        admin_id = from_user.get('id')
         
         if not data or not chat_id:
             return
         
-        if data == 'approve_payment':
-            # Extract payment ID from message text
-            message_text = message.get('text', '')
-            lines = message_text.split('\n')
-            payment_id = None
-            
-            for line in lines:
-                if line.startswith('🆔'):
-                    payment_id = line.split(' ')[1].strip('#')
-                    break
-            
-            if payment_id:
-                success, result_msg = approve_payment(payment_id)
-                if success:
-                    answer_callback_query(callback_query['id'], "✅ Payment approved!", True)
-                    # Update message
-                    updated_text = message_text + f"\n\n✅ Approved by Admin at {datetime.utcnow().strftime('%H:%M:%S')}"
-                    send_telegram('editMessageText', {
-                        'chat_id': chat_id,
-                        'message_id': message_id,
-                        'text': updated_text
-                    })
-                else:
-                    answer_callback_query(callback_query['id'], f"❌ Error: {result_msg}", True)
-            else:
-                answer_callback_query(callback_query['id'], "❌ Could not find payment ID", True)
+        logger.info(f"Callback query received: {data} from user {admin_id}")
         
-        elif data == 'reject_payment':
-            # Extract payment ID from message text
-            message_text = message.get('text', '')
-            lines = message_text.split('\n')
-            payment_id = None
+        # FIXED: Extract payment_id directly from callback data
+        if data.startswith('approve_'):
+            payment_id = data.replace('approve_', '')
+            logger.info(f"Approving payment: {payment_id}")
             
-            for line in lines:
-                if line.startswith('🆔'):
-                    payment_id = line.split(' ')[1].strip('#')
-                    break
-            
-            if payment_id:
-                success, result_msg = reject_payment(payment_id, "Manual rejection by admin")
-                if success:
-                    answer_callback_query(callback_query['id'], "❌ Payment rejected!", True)
-                    # Update message
-                    updated_text = message_text + f"\n\n❌ Rejected by Admin at {datetime.utcnow().strftime('%H:%M:%S')}"
-                    send_telegram('editMessageText', {
-                        'chat_id': chat_id,
-                        'message_id': message_id,
-                        'text': updated_text
-                    })
-                else:
-                    answer_callback_query(callback_query['id'], f"❌ Error: {result_msg}", True)
+            success, result_msg = approve_payment(payment_id, admin_id)
+            if success:
+                answer_callback_query(callback_query['id'], "✅ Payment approved!", True)
+                # Update message to show approved
+                updated_text = message.get('text', '') + f"\n\n✅ Approved by Admin at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+                
+                # Remove inline buttons
+                send_telegram('editMessageText', {
+                    'chat_id': chat_id,
+                    'message_id': message_id,
+                    'text': updated_text,
+                    'reply_markup': {'inline_keyboard': []}  # Empty keyboard to remove buttons
+                })
             else:
-                answer_callback_query(callback_query['id'], "❌ Could not find payment ID", True)
+                answer_callback_query(callback_query['id'], f"❌ Error: {result_msg}", True)
+        
+        elif data.startswith('reject_'):
+            payment_id = data.replace('reject_', '')
+            logger.info(f"Rejecting payment: {payment_id}")
+            
+            success, result_msg = reject_payment(payment_id, admin_id, "Rejected by admin")
+            if success:
+                answer_callback_query(callback_query['id'], "❌ Payment rejected!", True)
+                # Update message to show rejected
+                updated_text = message.get('text', '') + f"\n\n❌ Rejected by Admin at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+                
+                # Remove inline buttons
+                send_telegram('editMessageText', {
+                    'chat_id': chat_id,
+                    'message_id': message_id,
+                    'text': updated_text,
+                    'reply_markup': {'inline_keyboard': []}  # Empty keyboard to remove buttons
+                })
+            else:
+                answer_callback_query(callback_query['id'], f"❌ Error: {result_msg}", True)
                 
     except Exception as e:
-        logger.error(f"Callback query error: {e}")
+        logger.error(f"Callback query error: {e}", exc_info=True)
         try:
             answer_callback_query(callback_query['id'], "❌ An error occurred", True)
         except:
