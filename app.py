@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 import logging
 import threading
 import time
-import re
 
 # --- CONSTANTS & CONFIGURATION ---
 ADMIN_TELEGRAM_ID = 1352497419
@@ -17,7 +16,6 @@ GROUP_TELEGRAM_ID = -1002541647242  # DiskWala Channel
 TELUGU_GROUP_ID = -1003551789476  # Telugu Channel
 CONTENT_FORWARD_CHANNEL_ID = -1002776780769  # Video Files Channel
 PRODUCT_NAME = "Adult-Hub"
-PAYMENT_BOT_USERNAME = "@seeutech_bot"
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -35,13 +33,10 @@ counter_collection = None
 broadcast_collection = None
 requests_collection = None
 post_counter_collection = None
-users_collection = None
-plans_collection = None
-payments_collection = None
 
 def init_mongodb():
     global client, db, content_collection, counter_collection, broadcast_collection
-    global requests_collection, post_counter_collection, users_collection, plans_collection, payments_collection
+    global requests_collection, post_counter_collection
     
     try:
         client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
@@ -56,11 +51,6 @@ def init_mongodb():
         broadcast_collection = db["broadcasts"]
         requests_collection = db["video_requests"]
         post_counter_collection = db["post_counters"]
-        users_collection = db["users"]
-        plans_collection = db["plans"]
-        payments_collection = db["pending_payments"]
-        
-        init_default_plans()
         
         logger.info(f"MongoDB connected: {db_name}.{collection_name}")
         return True
@@ -68,47 +58,6 @@ def init_mongodb():
     except Exception as e:
         logger.error(f"MongoDB init failed: {e}")
         return False
-
-def init_default_plans():
-    """Initialize default subscription plans"""
-    try:
-        default_plans = [
-            {
-                'name': '2 Weeks',
-                'duration_days': 14,
-                'price': 40,
-                'description': '2 weeks access to all video files (no ads, direct links)',
-                'is_active': True,
-                'created_at': datetime.utcnow()
-            },
-            {
-                'name': '1 Month',
-                'duration_days': 30,
-                'price': 50,
-                'description': '1 month access to all video files (no ads, direct links)',
-                'is_active': True,
-                'created_at': datetime.utcnow()
-            },
-            {
-                'name': '1 Year',
-                'duration_days': 365,
-                'price': 200,
-                'description': '1 year access to all video files (no ads, direct links)',
-                'is_active': True,
-                'created_at': datetime.utcnow()
-            }
-        ]
-        
-        for plan in default_plans:
-            plans_collection.update_one(
-                {'name': plan['name']},
-                {'$set': plan},
-                upsert=True
-            )
-        
-        logger.info("Default plans initialized")
-    except Exception as e:
-        logger.error(f"Init default plans error: {e}")
 
 def get_next_sequence(sequence_name):
     try:
@@ -135,38 +84,6 @@ def get_next_post_number(channel_name):
     except:
         return 1
 
-# --- USER SUBSCRIPTION FUNCTIONS ---
-def check_user_subscription(user_id):
-    """Check if user has active subscription"""
-    try:
-        if users_collection is None:
-            return False
-            
-        user = users_collection.find_one({
-            'user_id': user_id,
-            'is_active': True,
-            'expiry_date': {'$gt': datetime.utcnow()}
-        })
-        
-        return user is not None
-    except Exception as e:
-        logger.error(f"Check subscription error: {e}")
-        return False
-
-def get_user_subscription(user_id):
-    """Get user subscription details"""
-    try:
-        if users_collection is None:
-            return None
-            
-        return users_collection.find_one({
-            'user_id': user_id,
-            'is_active': True
-        })
-    except Exception as e:
-        logger.error(f"Get subscription error: {e}")
-        return None
-
 def is_admin(user_id):
     """Check if user is admin"""
     return user_id == ADMIN_TELEGRAM_ID
@@ -188,9 +105,7 @@ ADMIN_MAIN_KEYBOARD = {
     'keyboard': [
         [{'text': '📁 DiskWala Posts'}, {'text': '🇮🇳 Telugu Posts'}],
         [{'text': '🎬 Video Files'}, {'text': '📢 Broadcast'}],
-        [{'text': '📥 Video Requests'}, {'text': '📊 Stats'}],
-        [{'text': '💰 Pending Payments'}, {'text': '📋 Plans'}],
-        [{'text': '👥 Active Users'}]
+        [{'text': '📥 Video Requests'}, {'text': '📊 Stats'}]
     ],
     'resize_keyboard': True,
     'one_time_keyboard': False
@@ -198,18 +113,7 @@ ADMIN_MAIN_KEYBOARD = {
 
 USER_MAIN_KEYBOARD = {
     'keyboard': [
-        [{'text': '📥 Request Video'}, {'text': '💰 Buy Plan'}],
-        [{'text': '🆕 My Requests'}, {'text': '📋 My Plan'}],
-        [{'text': '❌ Cancel'}]
-    ],
-    'resize_keyboard': True,
-    'one_time_keyboard': False
-}
-
-SUBSCRIBED_USER_KEYBOARD = {
-    'keyboard': [
-        [{'text': '📥 Request Video'}, {'text': '🎬 My Videos'}],
-        [{'text': '🆕 My Requests'}, {'text': '📋 My Plan'}],
+        [{'text': '📥 Request Video'}],
         [{'text': '❌ Cancel'}]
     ],
     'resize_keyboard': True,
@@ -229,25 +133,6 @@ BROADCAST_KEYBOARD = {
     'keyboard': [
         [{'text': '📺 DiskWala'}, {'text': '🇮🇳 Telugu'}],
         [{'text': '🎬 Video Files'}, {'text': '📡 All Channels'}],
-        [{'text': '🔙 Back to Menu'}]
-    ],
-    'resize_keyboard': True,
-    'one_time_keyboard': False
-}
-
-PLANS_KEYBOARD = {
-    'keyboard': [
-        [{'text': '2 Weeks - ₹40'}, {'text': '1 Month - ₹50'}],
-        [{'text': '1 Year - ₹200'}, {'text': '📋 View All Plans'}],
-        [{'text': '🔙 Back to Menu'}]
-    ],
-    'resize_keyboard': True,
-    'one_time_keyboard': False
-}
-
-PAYMENT_CONFIRM_KEYBOARD = {
-    'keyboard': [
-        [{'text': '✅ Confirm Payment'}, {'text': '❌ Cancel Payment'}],
         [{'text': '🔙 Back to Menu'}]
     ],
     'resize_keyboard': True,
@@ -309,7 +194,7 @@ def send_media_post(title, media_id, media_type, links, channel_id, channel_name
     
     post_number_text = f"#{post_number} " if post_number else ""
     
-    # FIXED: Proper video request button with inline keyboard
+    # Video request button with inline keyboard
     inline_keyboard = {
         'inline_keyboard': [
             [
@@ -318,7 +203,7 @@ def send_media_post(title, media_id, media_type, links, channel_id, channel_name
         ]
     }
     
-    # Default title format (as requested - no step 2 for title)
+    # Default title format
     caption = f"{post_number_text}🔥 {title} 🔥\n\n📥 Download Links/👀 Watch Online\n\n{link_text}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
     
     method = 'sendPhoto' if media_type == 'photo' else 'sendVideo'
@@ -384,225 +269,6 @@ def copy_message(from_chat_id, to_chat_id, message_id):
     except Exception as e:
         logger.error(f"Copy message error: {e}")
         return False
-
-def answer_callback_query(callback_query_id, text=None, show_alert=False):
-    """Answer a callback query"""
-    try:
-        payload = {'callback_query_id': callback_query_id}
-        if text:
-            payload['text'] = text
-        if show_alert:
-            payload['show_alert'] = show_alert
-        return send_telegram('answerCallbackQuery', payload)
-    except Exception as e:
-        logger.error(f"Answer callback error: {e}")
-        return False
-
-def edit_message_reply_markup(chat_id, message_id, reply_markup=None):
-    """Edit message reply markup"""
-    try:
-        payload = {
-            'chat_id': chat_id,
-            'message_id': message_id
-        }
-        if reply_markup:
-            payload['reply_markup'] = reply_markup
-        return send_telegram('editMessageReplyMarkup', payload)
-    except Exception as e:
-        logger.error(f"Edit message reply markup error: {e}")
-        return False
-
-# --- PAYMENT & SUBSCRIPTION FUNCTIONS ---
-def create_payment_request(user_id, plan_name, amount):
-    """Create a new payment request"""
-    try:
-        payment_id = get_next_sequence('payment_id')
-        
-        payment_doc = {
-            'payment_id': f"PAY{payment_id:06d}",
-            'user_id': user_id,
-            'plan_name': plan_name,
-            'amount': amount,
-            'status': 'pending',
-            'created_at': datetime.utcnow(),
-            'updated_at': datetime.utcnow()
-        }
-        
-        if payments_collection is None:
-            logger.error("Payments collection is None")
-            return None
-            
-        result = payments_collection.insert_one(payment_doc)
-        payment_doc['_id'] = str(result.inserted_id)
-        
-        # Notify admin
-        notify_admin_new_payment(payment_doc)
-        
-        return payment_doc
-        
-    except Exception as e:
-        logger.error(f"Create payment error: {e}")
-        return None
-
-def notify_admin_new_payment(payment_doc):
-    """Notify admin about new payment"""
-    try:
-        user_id = payment_doc['user_id']
-        payment_id = payment_doc['payment_id']
-        plan_name = payment_doc['plan_name']
-        amount = payment_doc['amount']
-        
-        # FIXED: Create inline keyboard with payment_id in callback data
-        inline_keyboard = {
-            'inline_keyboard': [
-                [
-                    {'text': '✅ Approve', 'callback_data': f'approve_{payment_id}'},
-                    {'text': '❌ Reject', 'callback_data': f'reject_{payment_id}'}
-                ]
-            ]
-        }
-        
-        message = f"""
-💰 New Payment Request #{payment_id}
-
-👤 User ID: {user_id}
-📦 Plan: {plan_name}
-💵 Amount: ₹{amount}
-📅 Time: {payment_doc['created_at'].strftime('%Y-%m-%d %H:%M:%S')}
-⏳ Status: Pending
-
-Click buttons below to approve/reject:
-        """
-        
-        # Send message with inline buttons
-        send_message(
-            ADMIN_TELEGRAM_ID,
-            message.strip(),
-            reply_markup=inline_keyboard
-        )
-        
-    except Exception as e:
-        logger.error(f"Notify admin error: {e}")
-
-def approve_payment(payment_id, admin_id):
-    """Approve a payment and activate subscription"""
-    try:
-        payment = payments_collection.find_one({'payment_id': payment_id})
-        if not payment:
-            return False, "Payment not found"
-        
-        if payment['status'] != 'pending':
-            return False, f"Payment already {payment['status']}"
-        
-        # Get plan details
-        plan = plans_collection.find_one({'name': payment['plan_name']})
-        if not plan:
-            return False, "Plan not found"
-        
-        # Calculate expiry date
-        expiry_date = datetime.utcnow() + timedelta(days=plan['duration_days'])
-        
-        # Create or update user subscription
-        subscription_data = {
-            'user_id': payment['user_id'],
-            'plan_name': payment['plan_name'],
-            'amount_paid': payment['amount'],
-            'payment_id': payment_id,
-            'purchase_date': datetime.utcnow(),
-            'expiry_date': expiry_date,
-            'is_active': True,
-            'approved_by': admin_id,
-            'created_at': datetime.utcnow()
-        }
-        
-        users_collection.update_one(
-            {'user_id': payment['user_id']},
-            {'$set': subscription_data},
-            upsert=True
-        )
-        
-        # Update payment status
-        payments_collection.update_one(
-            {'payment_id': payment_id},
-            {
-                '$set': {
-                    'status': 'approved',
-                    'approved_at': datetime.utcnow(),
-                    'approved_by': admin_id,
-                    'updated_at': datetime.utcnow()
-                }
-            }
-        )
-        
-        # Notify user
-        user_message = f"""
-✅ Payment Approved!
-
-Your subscription has been activated!
-📦 Plan: {plan['name']}
-💵 Amount: ₹{payment['amount']}
-📅 Valid until: {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}
-⏳ Duration: {plan['duration_days']} days
-
-🎉 You now have access to all video files!
-Use the '🎬 My Videos' option to browse content.
-        """
-        
-        send_message(payment['user_id'], user_message.strip())
-        
-        return True, "Payment approved and subscription activated"
-        
-    except Exception as e:
-        logger.error(f"Approve payment error: {e}")
-        return False, str(e)
-
-def reject_payment(payment_id, admin_id, reason="Payment verification failed"):
-    """Reject a payment request"""
-    try:
-        payment = payments_collection.find_one({'payment_id': payment_id})
-        if not payment:
-            return False, "Payment not found"
-        
-        payments_collection.update_one(
-            {'payment_id': payment_id},
-            {
-                '$set': {
-                    'status': 'rejected',
-                    'rejection_reason': reason,
-                    'rejected_at': datetime.utcnow(),
-                    'rejected_by': admin_id,
-                    'updated_at': datetime.utcnow()
-                }
-            }
-        )
-        
-        # Notify user
-        user_message = f"""
-❌ Payment Rejected
-
-Your payment request #{payment_id} has been rejected.
-Reason: {reason}
-
-💰 Please contact @{PAYMENT_BOT_USERNAME} for assistance.
-        """
-        
-        send_message(payment['user_id'], user_message.strip())
-        
-        return True, "Payment rejected"
-        
-    except Exception as e:
-        logger.error(f"Reject payment error: {e}")
-        return False, str(e)
-
-def get_pending_payments():
-    """Get all pending payments"""
-    try:
-        if payments_collection is None:
-            return []
-        return list(payments_collection.find({'status': 'pending'}).sort('created_at', -1))
-    except Exception as e:
-        logger.error(f"Get pending payments error: {e}")
-        return []
 
 # --- VIDEO REQUEST FUNCTIONS ---
 def create_video_request(user_id, media_id=None, media_type=None, message=None, text_description=None):
@@ -721,8 +387,7 @@ def process_user_media_request(chat_id, user_id, message, text=None):
         text_description=text_description
     )
     
-    is_subscribed = check_user_subscription(user_id)
-    user_keyboard = SUBSCRIBED_USER_KEYBOARD if is_subscribed else USER_MAIN_KEYBOARD
+    user_keyboard = USER_MAIN_KEYBOARD
     
     if request_doc:
         send_message(
@@ -962,21 +627,6 @@ def handle_admin_flow(chat_id, text, message, state):
         USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
         return True
     
-    elif text == '💰 Pending Payments':
-        handle_pending_payments_command(chat_id)
-        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-        return True
-    
-    elif text == '👥 Active Users':
-        handle_active_users_command(chat_id)
-        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-        return True
-    
-    elif text == '📋 Plans':
-        handle_plans_command(chat_id, ADMIN_TELEGRAM_ID)
-        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-        return True
-    
     # Channel mode selection
     elif state.get('step') == 'channel_mode':
         if text == '✏️ Single Post':
@@ -1015,7 +665,7 @@ def handle_admin_flow(chat_id, text, message, state):
                 send_message(chat_id, "❌ Failed to forward message")
         return True
     
-    # Channel media - REMOVED TITLE STEP as requested
+    # Channel media - No title step
     elif state.get('step') == 'channel_media':
         if 'video' in message:
             media_id = message['video']['file_id']
@@ -1027,17 +677,17 @@ def handle_admin_flow(chat_id, text, message, state):
             send_message(chat_id, "❌ Please send a photo or video")
             return True
         
-        # Store media info and move directly to URLs (skip title step)
+        # Store media info and move directly to URLs
         USER_STATE[chat_id]['data'] = {
             'telegram_media_id': media_id,
             'media_type': media_type,
             'title': "Movie / Content Title"  # Default title
         }
-        USER_STATE[chat_id]['step'] = 'channel_urls'  # Skip title step
+        USER_STATE[chat_id]['step'] = 'channel_urls'
         send_message(chat_id, f"✅ {media_type.title()} saved!\n\nSend URLs (one per line):")
         return True
     
-    # Channel URLs (now step 2/2 instead of 3/3)
+    # Channel URLs
     elif state.get('step') == 'channel_urls':
         urls = [url.strip() for url in text.strip().split('\n') if url.strip()]
         
@@ -1045,7 +695,7 @@ def handle_admin_flow(chat_id, text, message, state):
             send_message(chat_id, "❌ Please send valid URLs")
             return True
         
-        title = state['data']['title']  # Using default title
+        title = state['data']['title']
         media_id = state['data']['telegram_media_id']
         media_type = state['data']['media_type']
         channel_id_target = state.get('channel_id', GROUP_TELEGRAM_ID)
@@ -1075,7 +725,7 @@ def handle_admin_flow(chat_id, text, message, state):
                     "tags": title.lower().split(),
                     "links": links,
                     "views": 0,
-                    "created_at": datetime.utcnow()  # FIXED: Corrected string literal
+                    "created_at": datetime.utcnow()
                 }
                 content_collection.insert_one(content_data)
                 
@@ -1160,188 +810,6 @@ def handle_admin_flow(chat_id, text, message, state):
     
     return False
 
-def handle_pending_payments_command(chat_id):
-    """Show pending payments to admin"""
-    try:
-        pending_payments = get_pending_payments()
-        
-        if not pending_payments:
-            send_message(chat_id, "💰 No pending payments", ADMIN_MAIN_KEYBOARD)
-            return
-        
-        message_text = "💰 Pending Payments:\n\n"
-        for payment in pending_payments:
-            message_text += f"🆔 {payment['payment_id']}\n"
-            message_text += f"👤 User: {payment['user_id']}\n"
-            message_text += f"📦 Plan: {payment['plan_name']}\n"
-            message_text += f"💵 Amount: ₹{payment['amount']}\n"
-            message_text += f"📅 Requested: {payment['created_at'].strftime('%Y-%m-%d %H:%M')}\n"
-            message_text += "\n━━━━━━━━━━━━━━━━━\n\n"
-        
-        send_message(chat_id, message_text, ADMIN_MAIN_KEYBOARD)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}", ADMIN_MAIN_KEYBOARD)
-
-def handle_active_users_command(chat_id):
-    """Show active subscribers"""
-    try:
-        if users_collection is None:
-            send_message(chat_id, "Database not available", ADMIN_MAIN_KEYBOARD)
-            return
-        
-        active_users = list(users_collection.find({
-            'is_active': True,
-            'expiry_date': {'$gt': datetime.utcnow()}
-        }).sort('expiry_date', 1).limit(50))
-        
-        if not active_users:
-            send_message(chat_id, "👥 No active subscribers", ADMIN_MAIN_KEYBOARD)
-            return
-        
-        message_text = "👥 Active Subscribers:\n\n"
-        
-        for user in active_users:
-            days_left = (user['expiry_date'] - datetime.utcnow()).days
-            message_text += f"👤 User ID: {user['user_id']}\n"
-            message_text += f"📦 Plan: {user['plan_name']}\n"
-            message_text += f"⏳ Expires in: {days_left} days\n"
-            message_text += f"📅 Expiry: {user['expiry_date'].strftime('%Y-%m-%d')}\n"
-            message_text += "\n━━━━━━━━━━━━━━━━━\n\n"
-        
-        send_message(chat_id, message_text, ADMIN_MAIN_KEYBOARD)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}", ADMIN_MAIN_KEYBOARD)
-
-def handle_subscriptions_menu(chat_id):
-    """Handle subscriptions menu"""
-    try:
-        if users_collection is None:
-            send_message(chat_id, "Database not available", ADMIN_MAIN_KEYBOARD)
-            return
-        
-        total_users = users_collection.count_documents({})
-        active_subs = users_collection.count_documents({
-            'is_active': True,
-            'expiry_date': {'$gt': datetime.utcnow()}
-        })
-        expired_subs = users_collection.count_documents({
-            'expiry_date': {'$lt': datetime.utcnow()}
-        })
-        
-        # Calculate total revenue
-        total_revenue = 0
-        active_users = users_collection.find({'is_active': True})
-        for user in active_users:
-            total_revenue += user.get('amount_paid', 0)
-        
-        message_text = f"""
-💰 Subscription Statistics
-
-👥 Total Users: {total_users}
-✅ Active Subscriptions: {active_subs}
-❌ Expired Subscriptions: {expired_subs}
-💰 Total Revenue: ₹{total_revenue}
-        """
-        
-        send_message(chat_id, message_text.strip(), ADMIN_MAIN_KEYBOARD)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}", ADMIN_MAIN_KEYBOARD)
-
-def handle_plans_command(chat_id, user_id):
-    """Show subscription plans"""
-    try:
-        if plans_collection is None:
-            send_message(chat_id, "Plans not available at the moment.")
-            return
-        
-        plans = list(plans_collection.find({'is_active': True}).sort('duration_days', 1))
-        
-        if not plans:
-            send_message(chat_id, "No plans available at the moment.")
-            return
-        
-        message_text = "💰 Subscription Plans\n\n"
-        message_text += "Get direct video files - no links or ads!\n\n"
-        
-        for plan in plans:
-            message_text += f"📋 {plan['name']}\n"
-            message_text += f"💵 Price: ₹{plan['price']}\n"
-            message_text += f"⏳ Duration: {plan['duration_days']} days\n"
-            message_text += f"📝 {plan.get('description', '')}\n\n"
-        
-        if is_admin(user_id):
-            message_text += "Admin: Use /paid <user_id> <plan_name> <amount> to manually add subscription"
-        else:
-            message_text += f"💳 To purchase:\n1. Select a plan below\n2. Pay to {PAYMENT_BOT_USERNAME}\n3. Send receipt to this bot"
-        
-        keyboard = PLANS_KEYBOARD if not is_admin(user_id) else None
-        send_message(chat_id, message_text, keyboard)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
-def handle_paid_command(chat_id, text):
-    """Handle /paid command for admin to manually add subscription"""
-    try:
-        parts = text.split(maxsplit=3)
-        if len(parts) < 4:
-            send_message(chat_id, "Usage: /paid <user_id> <plan_name> <amount>")
-            return
-        
-        user_id = int(parts[1])
-        plan_name = parts[2]
-        amount = float(parts[3])
-        
-        # Get plan details
-        plan = plans_collection.find_one({'name': plan_name})
-        if not plan:
-            send_message(chat_id, f"❌ Plan '{plan_name}' not found")
-            return
-        
-        # Calculate expiry date
-        expiry_date = datetime.utcnow() + timedelta(days=plan['duration_days'])
-        
-        # Create subscription
-        subscription_data = {
-            'user_id': user_id,
-            'plan_name': plan_name,
-            'amount_paid': amount,
-            'purchase_date': datetime.utcnow(),
-            'expiry_date': expiry_date,
-            'is_active': True,
-            'admin_added': True,
-            'created_at': datetime.utcnow()
-        }
-        
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$set': subscription_data},
-            upsert=True
-        )
-        
-        # Notify user
-        user_message = f"""
-✅ Subscription Activated!
-
-Admin has activated your subscription!
-📦 Plan: {plan['name']}
-💵 Amount: ₹{amount}
-📅 Valid until: {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}
-⏳ Duration: {plan['duration_days']} days
-
-🎉 You now have access to all video files!
-        """
-        
-        send_message(user_id, user_message.strip())
-        
-        send_message(chat_id, f"✅ Subscription added for user {user_id}")
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
 def handle_requests_command(chat_id):
     """Handle pending requests view"""
     try:
@@ -1401,9 +869,6 @@ def handle_stats_command(chat_id):
             "total_requests": 0,
             "pending_requests": 0,
             "completed_requests": 0,
-            "total_users": 0,
-            "active_subs": 0,
-            "total_revenue": 0,
             "channels": {
                 'diskwala': 0,
                 'telugu': 0,
@@ -1422,39 +887,11 @@ def handle_stats_command(chat_id):
             stats["pending_requests"] = requests_collection.count_documents({"status": "pending"})
             stats["completed_requests"] = requests_collection.count_documents({"status": "completed"})
         
-        if users_collection is not None:
-            stats["total_users"] = users_collection.count_documents({})
-            stats["active_subs"] = users_collection.count_documents({
-                'is_active': True,
-                'expiry_date': {'$gt': datetime.utcnow()}
-            })
-            
-            # Calculate total revenue
-            active_users = users_collection.find({'is_active': True})
-            for user in active_users:
-                stats["total_revenue"] += user.get('amount_paid', 0)
-        
-        pending_payments = 0
-        approved_payments = 0
-        
-        if payments_collection is not None:
-            pending_payments = payments_collection.count_documents({'status': 'pending'})
-            approved_payments = payments_collection.count_documents({'status': 'approved'})
-        
         message_text = "📊 System Statistics\n\n"
         message_text += f"📁 Total Posts: {stats['total_content']}\n"
         message_text += f"📥 Total Requests: {stats['total_requests']}\n"
         message_text += f"⏳ Pending: {stats['pending_requests']}\n"
         message_text += f"✅ Completed: {stats['completed_requests']}\n\n"
-        
-        message_text += "👥 Users:\n"
-        message_text += f"  • Total: {stats['total_users']}\n"
-        message_text += f"  • Active Subs: {stats['active_subs']}\n"
-        message_text += f"  • Revenue: ₹{stats['total_revenue']}\n\n"
-        
-        message_text += "💰 Payments:\n"
-        message_text += f"  • Pending: {pending_payments}\n"
-        message_text += f"  • Approved: {approved_payments}\n\n"
         
         message_text += "📈 Channel Posts:\n"
         message_text += f"  • DiskWala: {stats['channels']['diskwala']}\n"
@@ -1494,232 +931,9 @@ def handle_my_requests_command(chat_id, user_id):
     except Exception as e:
         send_message(chat_id, f"Error: {str(e)}")
 
-def handle_my_plan_command(chat_id, user_id):
-    """Show user's subscription plan"""
-    try:
-        subscription = get_user_subscription(user_id)
-        
-        if not subscription:
-            message_text = "❌ You don't have an active subscription.\n\n"
-            message_text += "✨ Benefits of subscription:\n"
-            message_text += "• Direct access to all video files\n"
-            message_text += "• No ads or redirects\n"
-            message_text += "• Priority support\n\n"
-            message_text += "Use '💰 Buy Plan' to purchase a subscription!"
-            send_message(chat_id, message_text)
-            return
-        
-        is_active = subscription.get('is_active', False) and subscription.get('expiry_date', datetime.min) > datetime.utcnow()
-        
-        message_text = "📋 Your Subscription Plan\n\n"
-        message_text += f"📦 Plan: {subscription['plan_name']}\n"
-        message_text += f"💵 Amount Paid: ₹{subscription['amount_paid']}\n"
-        message_text += f"📅 Purchase Date: {subscription['purchase_date'].strftime('%Y-%m-%d')}\n"
-        message_text += f"⏰ Expiry Date: {subscription['expiry_date'].strftime('%Y-%m-%d')}\n"
-        
-        if is_active:
-            days_left = (subscription['expiry_date'] - datetime.utcnow()).days
-            message_text += f"✅ Status: Active ({days_left} days left)\n"
-            message_text += "\n🎉 Enjoy your subscription!"
-        else:
-            message_text += "❌ Status: Expired\n"
-            message_text += "\nUse '💰 Buy Plan' to renew your subscription!"
-        
-        send_message(chat_id, message_text)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
-def handle_buy_plan_flow(chat_id, user_id, text, message, state):
-    """Handle user buying plan flow"""
-    
-    if text == '💰 Buy Plan':
-        handle_plans_command(chat_id, user_id)
-        USER_STATE[chat_id] = {'step': 'plan_selection', 'timestamp': time.time()}
-        return True
-    
-    elif state.get('step') == 'plan_selection':
-        plan_map = {
-            '2 Weeks - ₹40': '2 Weeks',
-            '1 Month - ₹50': '1 Month', 
-            '1 Year - ₹200': '1 Year',
-            '📋 View All Plans': 'view_all'
-        }
-        
-        if text in plan_map:
-            if text == '📋 View All Plans':
-                handle_plans_command(chat_id, user_id)
-                return True
-            
-            plan_name = plan_map[text]
-            plan = plans_collection.find_one({'name': plan_name})
-            
-            if not plan:
-                send_message(chat_id, "❌ Plan not available")
-                return True
-            
-            USER_STATE[chat_id] = {
-                'step': 'payment_confirmation',
-                'selected_plan': plan_name,
-                'plan_price': plan['price'],
-                'timestamp': time.time()
-            }
-            
-            message_text = f"""
-💰 Confirm Plan Purchase
-
-📦 Plan: {plan_name}
-💵 Price: ₹{plan['price']}
-⏳ Duration: {plan['duration_days']} days
-
-💳 Payment Instructions:
-1. Send ₹{plan['price']} to {PAYMENT_BOT_USERNAME}
-2. Save the payment receipt
-3. Click '✅ Confirm Payment' below
-4. Send the receipt to this bot
-
-⚠️ Important: Keep your receipt for verification
-            """
-            
-            send_message(chat_id, message_text.strip(), PAYMENT_CONFIRM_KEYBOARD)
-            return True
-    
-    elif state.get('step') == 'payment_confirmation':
-        if text == '✅ Confirm Payment':
-            plan_name = state.get('selected_plan')
-            plan_price = state.get('plan_price')
-            
-            # Create payment request
-            payment_doc = create_payment_request(user_id, plan_name, plan_price)
-            
-            if payment_doc:
-                message_text = f"""
-✅ Payment Request Created!
-
-🆔 Payment ID: {payment_doc['payment_id']}
-📦 Plan: {plan_name}
-💵 Amount: ₹{plan_price}
-
-💳 Now send the payment receipt to complete verification.
-
-Steps:
-1. Pay ₹{plan_price} to {PAYMENT_BOT_USERNAME}
-2. Take screenshot of payment
-3. Send screenshot here
-4. Admin will approve within 24 hours
-
-Payment ID: {payment_doc['payment_id']}
-                """
-                
-                send_message(chat_id, message_text.strip())
-                USER_STATE[chat_id] = {'step': 'waiting_receipt', 'payment_id': payment_doc['payment_id'], 'timestamp': time.time()}
-            else:
-                send_message(chat_id, "❌ Failed to create payment request. Please try again.", USER_MAIN_KEYBOARD)
-                USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-            return True
-        
-        elif text == '❌ Cancel Payment':
-            send_message(chat_id, "❌ Payment cancelled.", USER_MAIN_KEYBOARD)
-            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-            return True
-    
-    elif state.get('step') == 'waiting_receipt':
-        # User is sending receipt (photo)
-        if 'photo' in message:
-            payment_id = state.get('payment_id')
-            
-            # Forward receipt to admin
-            media_id = message['photo'][-1]['file_id']
-            caption = f"📄 Receipt for Payment #{payment_id}\n👤 User: {user_id}"
-            send_photo(ADMIN_TELEGRAM_ID, media_id, caption)
-            
-            send_message(
-                chat_id,
-                f"✅ Receipt received!\n\n"
-                f"Payment ID: {payment_id}\n"
-                f"✅ Your receipt has been forwarded to admin.\n"
-                f"Your subscription will be activated after verification.\n"
-                f"You'll receive a confirmation message when approved.",
-                USER_MAIN_KEYBOARD
-            )
-            
-            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-            return True
-    
-    return False
-
-# --- CALLBACK QUERY HANDLER ---
-def handle_callback_query(callback_query):
-    """Handle inline button callbacks"""
-    try:
-        data = callback_query.get('data')
-        message = callback_query.get('message', {})
-        chat_id = message.get('chat', {}).get('id')
-        message_id = message.get('message_id')
-        from_user = callback_query.get('from', {})
-        admin_id = from_user.get('id')
-        
-        if not data or not chat_id:
-            return
-        
-        logger.info(f"Callback query received: {data} from user {admin_id}")
-        
-        # FIXED: Extract payment_id directly from callback data
-        if data.startswith('approve_'):
-            payment_id = data.replace('approve_', '')
-            logger.info(f"Approving payment: {payment_id}")
-            
-            success, result_msg = approve_payment(payment_id, admin_id)
-            if success:
-                answer_callback_query(callback_query['id'], "✅ Payment approved!", True)
-                # Update message to show approved
-                updated_text = message.get('text', '') + f"\n\n✅ Approved by Admin at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
-                
-                # Remove inline buttons
-                send_telegram('editMessageText', {
-                    'chat_id': chat_id,
-                    'message_id': message_id,
-                    'text': updated_text,
-                    'reply_markup': {'inline_keyboard': []}  # Empty keyboard to remove buttons
-                })
-            else:
-                answer_callback_query(callback_query['id'], f"❌ Error: {result_msg}", True)
-        
-        elif data.startswith('reject_'):
-            payment_id = data.replace('reject_', '')
-            logger.info(f"Rejecting payment: {payment_id}")
-            
-            success, result_msg = reject_payment(payment_id, admin_id, "Rejected by admin")
-            if success:
-                answer_callback_query(callback_query['id'], "❌ Payment rejected!", True)
-                # Update message to show rejected
-                updated_text = message.get('text', '') + f"\n\n❌ Rejected by Admin at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
-                
-                # Remove inline buttons
-                send_telegram('editMessageText', {
-                    'chat_id': chat_id,
-                    'message_id': message_id,
-                    'text': updated_text,
-                    'reply_markup': {'inline_keyboard': []}  # Empty keyboard to remove buttons
-                })
-            else:
-                answer_callback_query(callback_query['id'], f"❌ Error: {result_msg}", True)
-                
-    except Exception as e:
-        logger.error(f"Callback query error: {e}", exc_info=True)
-        try:
-            answer_callback_query(callback_query['id'], "❌ An error occurred", True)
-        except:
-            pass
-
 # --- MAIN UPDATE HANDLER ---
 def process_update(update):
     try:
-        # Check for callback queries first
-        if 'callback_query' in update:
-            handle_callback_query(update['callback_query'])
-            return
-            
         message = update.get('message')
         if not message:
             return
@@ -1729,8 +943,7 @@ def process_update(update):
         user_id = message['from']['id']
         
         admin = is_admin(user_id)
-        is_subscribed = check_user_subscription(user_id)
-        user_keyboard = SUBSCRIBED_USER_KEYBOARD if is_subscribed else USER_MAIN_KEYBOARD
+        user_keyboard = USER_MAIN_KEYBOARD
         
         logger.info(f"Update - Chat: {chat_id}, User: {user_id}, Text: '{text[:50] if text else 'media'}', Admin: {admin}")
         
@@ -1749,15 +962,8 @@ def process_update(update):
                 )
             else:
                 welcome_msg = f"👋 Welcome to {PRODUCT_NAME}!\n\n"
-                if is_subscribed:
-                    welcome_msg += "✅ You have an active subscription!\n"
-                    welcome_msg += "Access all video files directly without ads.\n\n"
-                    welcome_msg += "✨ Premium Features:\n"
-                    welcome_msg += "• Direct video access\n• No ads\n• Priority support\n\n"
-                else:
-                    welcome_msg += "✨ Features:\n"
-                    welcome_msg += "• Request any video\n• Buy plan for direct access\n• No ads for subscribers\n\n"
-                
+                welcome_msg += "✨ Features:\n"
+                welcome_msg += "• Request any video\n• Get matched content\n\n"
                 welcome_msg += "Select an option:"
                 send_message(chat_id, welcome_msg, user_keyboard)
             
@@ -1783,9 +989,6 @@ def process_update(update):
             elif text.startswith('/sendmedia'):
                 handle_sendmedia_command(chat_id, text)
                 return
-            elif text.startswith('/paid'):
-                handle_paid_command(chat_id, text)
-                return
             
             # Handle admin sending matching media
             if state.get('step') == 'sending_matching_media':
@@ -1802,33 +1005,9 @@ def process_update(update):
         
         # --- USER FLOW ---
         
-        # Handle buy plan flow
-        if handle_buy_plan_flow(chat_id, user_id, text, message, state):
-            return
-        
-        # User commands
-        if text == '/plans' or text == '📋 View All Plans':
-            handle_plans_command(chat_id, user_id)
-            return
-        
         # User menu options
         if text == '📥 Request Video':
             handle_user_request(chat_id, user_id)
-            return
-        
-        elif text == '🆕 My Requests':
-            handle_my_requests_command(chat_id, user_id)
-            return
-        
-        elif text == '📋 My Plan':
-            handle_my_plan_command(chat_id, user_id)
-            return
-        
-        elif text in ['🎬 My Videos', '🎬 Video Files']:
-            if is_subscribed:
-                send_message(chat_id, "🎬 Video Files\n\nAccess the Video Files channel for all content!", user_keyboard)
-            else:
-                send_message(chat_id, "❌ This feature requires an active subscription.\n\nUse '💰 Buy Plan' to get access!", user_keyboard)
             return
         
         # Handle request flow
