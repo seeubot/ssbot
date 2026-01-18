@@ -22,13 +22,6 @@ TELUGU_GROUP_ID = -1003551789476  # Telugu Channel
 CONTENT_FORWARD_CHANNEL_ID = -1002776780769  # Video Files Channel
 PRODUCT_NAME = "Adult-Hub"
 
-# List of restricted channels (block forwarding to/from these)
-RESTRICTED_CHANNELS = [
-    GROUP_TELEGRAM_ID,    # DiskWala Channel
-    TELUGU_GROUP_ID,      # Telugu Channel
-    CONTENT_FORWARD_CHANNEL_ID  # Video Files Channel
-]
-
 # --- LOGGING SETUP ---
 logging.basicConfig(
     level=logging.INFO,
@@ -129,14 +122,6 @@ APP_URL = os.environ.get("APP_URL")
 PORT = int(os.environ.get("PORT", 8000))
 BOT_USERNAME = None  # Will be set after bot info fetch
 
-# --- FILE UPLOAD CONFIGURATION ---
-UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'avi', 'mov', 'mkv'}
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/" if BOT_TOKEN else None
 
 app = Flask(__name__)
@@ -233,112 +218,58 @@ def send_message(chat_id, text, keyboard=None, parse_mode=None, disable_web_page
     return send_telegram('sendMessage', payload)
 
 def send_media_post(title, media_id, media_type, links, channel_id, channel_name, post_number=None):
-    """Send media post to specified channel with post number and REQUEST BUTTON"""
+    """Send media post to specified channel with post number"""
     if not TELEGRAM_API:
         return False
 
-    # Default format as requested
-    link_text = "📥 Download Links/👀 Watch Online\n\n"
-    link_text += "Open in Diskwala App 👇\n"
-    link_text += "\n".join([f"{link['url']}" for link in links])
+    # Get bot info for request URL
+    bot_url = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "Contact Admin"
     
-    # Add post number
+    link_text = "\n".join([f"🔗 {link.get('episode_title', 'Link')}: {link['url']}" for link in links])
+    
+    # Add post number to caption if available
     post_number_text = f"#{post_number} " if post_number else ""
+    request_button = f"\n\n📥 Request Video: {bot_url}?start=request"
     
-    caption = f"{post_number_text}🔥 {title} 🔥\n\n{link_text}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
-    
-    # Create inline keyboard with Request Video button
-    request_keyboard = {
-        'inline_keyboard': [[
-            {
-                'text': '📥 Request Video',
-                'url': f'https://t.me/{BOT_USERNAME}?start=request' if BOT_USERNAME else 'https://t.me/bot'
-            }
-        ]]
-    }
+    caption = f"{post_number_text}🔥 {title} 🔥\n\n{link_text}{request_button}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
     
     method = 'sendPhoto' if media_type == 'photo' else 'sendVideo'
     key = 'photo' if media_type == 'photo' else 'video'
     
-    return send_telegram(method, {
-        'chat_id': channel_id, 
-        key: media_id, 
-        'caption': caption,
-        'reply_markup': json.dumps(request_keyboard),
-        'parse_mode': 'HTML'  # Using HTML to prevent formatting issues
-    })
+    return send_telegram(method, {'chat_id': channel_id, key: media_id, 'caption': caption})
 
-def is_restricted_channel(chat_id):
-    """Check if chat_id is in restricted channels list"""
-    return chat_id in RESTRICTED_CHANNELS
-
-def forward_media_to_user(user_id, media_id, media_type, caption=None):
-    """Forward media file from bot to user"""
+def forward_message(chat_id, from_chat_id, message_id):
+    """Forward a message"""
     try:
-        if media_type == 'photo':
-            method = 'sendPhoto'
-            payload = {'chat_id': user_id, 'photo': media_id}
-        elif media_type == 'video':
-            method = 'sendVideo'
-            payload = {'chat_id': user_id, 'video': media_id}
-        else:
-            return False
-        
-        if caption:
-            payload['caption'] = caption
-            
-        return send_telegram(method, payload)
+        return send_telegram('forwardMessage', {
+            'chat_id': chat_id,
+            'from_chat_id': from_chat_id,
+            'message_id': message_id
+        })
     except Exception as e:
-        logger.error(f"Forward media to user error: {e}")
+        logger.error(f"Forward message error: {e}")
         return False
 
-def forward_media_to_admin(admin_id, media_id, media_type, caption=None):
-    """Forward media file from bot to admin"""
+def send_photo(chat_id, photo_id, caption=None):
+    """Send photo by file_id"""
     try:
-        if media_type == 'photo':
-            method = 'sendPhoto'
-            payload = {'chat_id': admin_id, 'photo': media_id}
-        elif media_type == 'video':
-            method = 'sendVideo'
-            payload = {'chat_id': admin_id, 'video': media_id}
-        else:
-            return False
-        
+        payload = {'chat_id': chat_id, 'photo': photo_id}
         if caption:
             payload['caption'] = caption
-            
-        return send_telegram(method, payload)
+        return send_telegram('sendPhoto', payload)
     except Exception as e:
-        logger.error(f"Forward media to admin error: {e}")
+        logger.error(f"Send photo error: {e}")
         return False
 
-def copy_message_to_user(user_id, message):
-    """Copy a message from bot to user"""
+def send_video(chat_id, video_id, caption=None):
+    """Send video by file_id"""
     try:
-        # Check what type of content is in the message
-        if 'photo' in message:
-            # Get the highest quality photo
-            photo = message['photo'][-1]
-            caption = message.get('caption', '')
-            return forward_media_to_user(user_id, photo['file_id'], 'photo', caption)
-            
-        elif 'video' in message:
-            video = message['video']
-            caption = message.get('caption', '')
-            return forward_media_to_user(user_id, video['file_id'], 'video', caption)
-            
-        elif 'text' in message:
-            return send_message(user_id, message['text'])
-            
-        else:
-            # For other types, forward the message
-            return send_telegram('forwardMessage', {
-                'chat_id': user_id,
-                'from_chat_id': message['chat']['id'],
-                'message_id': message['message_id']
-            })
+        payload = {'chat_id': chat_id, 'video': video_id}
+        if caption:
+            payload['caption'] = caption
+        return send_telegram('sendVideo', payload)
     except Exception as e:
-        logger.error(f"Copy message error: {e}")
+        logger.error(f"Send video error: {e}")
         return False
 
 # --- VIDEO REQUEST FUNCTIONS ---
@@ -364,15 +295,15 @@ def create_video_request(user_id, media_id=None, media_type=None, message=None):
         }
         
         if requests_collection is None:
+            logger.error("Requests collection is None")
             return None
             
         result = requests_collection.insert_one(request_doc)
         request_doc['_id'] = str(result.inserted_id)
         
-        # Forward the media to admin immediately
-        if media_id and media_type:
-            forward_media_to_admin(ADMIN_TELEGRAM_ID, media_id, media_type, 
-                                  caption=f"🆕 Request #{request_doc['request_id']}")
+        # Send the media to admin immediately
+        if media_id and media_type and message:
+            forward_user_media_to_admin(media_id, media_type, request_doc['request_id'], message)
         
         # Send notification to admin
         notify_admin_new_request(request_doc)
@@ -383,6 +314,19 @@ def create_video_request(user_id, media_id=None, media_type=None, message=None):
         logger.error(f"Create request error: {e}")
         return None
 
+def forward_user_media_to_admin(media_id, media_type, request_id, original_message):
+    """Forward user's media to admin"""
+    try:
+        caption = f"🆕 Request #{request_id}\n👤 From: {original_message['from']['id']}"
+        
+        if media_type == 'photo':
+            send_photo(ADMIN_TELEGRAM_ID, media_id, caption)
+        elif media_type == 'video':
+            send_video(ADMIN_TELEGRAM_ID, media_id, caption)
+            
+    except Exception as e:
+        logger.error(f"Forward media to admin error: {e}")
+
 def notify_admin_new_request(request_doc):
     """Notify admin about new video request"""
     try:
@@ -391,15 +335,16 @@ def notify_admin_new_request(request_doc):
         media_type = request_doc.get('media_type', 'Unknown')
         
         message = f"""
-🆕 New Video Request
+📥 New Video Request #{request_id}
 
-🆔 Request ID: {request_id}
-📸 Media Type: {media_type}
+📸 Type: {media_type}
 👤 User ID: {user_id}
-📅 Date: {request_doc['createdAt'].strftime('%Y-%m-%d %H:%M')}
+📅 Time: {request_doc['createdAt'].strftime('%H:%M:%S')}
+⏳ Status: Pending
 
-Use /reply {request_id} <video_url> to send to user
-Or /replymedia {request_id} to forward matching media
+Commands:
+/reply {request_id} <video_url> - Send URL to user
+/sendmedia {request_id} - Send matching media to user
         """
         
         # Send to admin
@@ -463,7 +408,7 @@ def handle_reply_command(chat_id, text):
         
         # Send video URL to user
         user_message = f"""
-✅ Your Request Completed!
+✅ Request Completed!
 
 Your request #{request_id} has been fulfilled!
 🔗 Video Link: {video_url}
@@ -486,22 +431,22 @@ Thank you for using our service!
         )
         
         if result.modified_count > 0:
-            send_message(chat_id, f"✅ Video sent to user for request {request_id}")
+            send_message(chat_id, f"✅ Video URL sent to user for request {request_id}")
         else:
             send_message(chat_id, f"⚠️ Request {request_id} update failed")
             
     except Exception as e:
         send_message(chat_id, f"Error: {str(e)}")
 
-def handle_replymedia_command(chat_id, text):
-    """Handle /replymedia command to forward matching media to user"""
+def handle_sendmedia_command(chat_id, text):
+    """Handle /sendmedia command - admin sends matching media to user"""
     try:
         parts = text.split()
         if len(parts) < 2:
-            send_message(chat_id, "Usage: /replymedia <request_id>")
+            send_message(chat_id, "Usage: /sendmedia <request_id>")
             send_message(chat_id, "Then send the matching photo/video you found")
             USER_STATE[chat_id] = {
-                'step': 'waiting_admin_media',
+                'step': 'waiting_matching_media',
                 'timestamp': time.time()
             }
             return
@@ -525,6 +470,83 @@ def handle_replymedia_command(chat_id, text):
         
     except Exception as e:
         send_message(chat_id, f"Error: {str(e)}")
+
+def handle_admin_matching_media(chat_id, message, state):
+    """Handle admin sending matching media for a request"""
+    try:
+        request_id = state['request_id']
+        user_id = state['user_id']
+        
+        media_id = None
+        media_type = None
+        
+        if 'photo' in message:
+            media_id = message['photo'][-1]['file_id']
+            media_type = 'photo'
+            caption = message.get('caption', '')
+        elif 'video' in message:
+            media_id = message['video']['file_id']
+            media_type = 'video'
+            caption = message.get('caption', '')
+        elif 'text' in message:
+            # Admin sent text with URL
+            user_message = f"✅ Your request #{request_id} has been fulfilled!\n\n🔗 {message['text']}"
+            send_message(user_id, user_message)
+            
+            # Update request
+            requests_collection.update_one(
+                {'request_id': request_id},
+                {
+                    '$set': {
+                        'status': 'completed',
+                        'video_result': message['text'],
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+            
+            send_message(chat_id, f"✅ Text/URL sent to user for request {request_id}")
+            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+            return
+        else:
+            send_message(chat_id, "❌ Please send photo, video, or text with URL")
+            return
+        
+        # Send matching media to user
+        user_caption = f"✅ Your request #{request_id} has been fulfilled!"
+        if caption:
+            user_caption += f"\n\n{caption}"
+        
+        success = False
+        if media_type == 'photo':
+            success = send_photo(user_id, media_id, user_caption)
+        elif media_type == 'video':
+            success = send_video(user_id, media_id, user_caption)
+        
+        if success:
+            # Update request
+            requests_collection.update_one(
+                {'request_id': request_id},
+                {
+                    '$set': {
+                        'status': 'completed',
+                        'video_result': 'Media forwarded',
+                        'result_media_id': media_id,
+                        'result_media_type': media_type,
+                        'updatedAt': datetime.utcnow()
+                    }
+                }
+            )
+            
+            send_message(chat_id, f"✅ Matching media sent to user for request {request_id}")
+        else:
+            send_message(chat_id, f"❌ Failed to send media for request {request_id}")
+        
+        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+        
+    except Exception as e:
+        send_message(chat_id, f"Error: {str(e)}")
+        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
 
 def handle_complete_command(chat_id, text):
     """Handle /complete command from admin for video requests"""
@@ -560,6 +582,10 @@ def handle_complete_command(chat_id, text):
 def handle_requests_command(chat_id):
     """Handle /requests command to show pending requests"""
     try:
+        if requests_collection is None:
+            send_message(chat_id, "Database not available")
+            return
+            
         pending = list(requests_collection.find({'status': 'pending'}).sort('createdAt', -1).limit(10))
         
         if not pending:
@@ -578,9 +604,38 @@ def handle_requests_command(chat_id):
     except Exception as e:
         send_message(chat_id, f"Error: {str(e)}")
 
+def handle_all_requests_command(chat_id):
+    """Show all requests"""
+    try:
+        if requests_collection is None:
+            send_message(chat_id, "Database not available")
+            return
+            
+        all_requests = list(requests_collection.find().sort('createdAt', -1).limit(20))
+        
+        if not all_requests:
+            send_message(chat_id, "No requests found")
+            return
+        
+        message = "📊 All Requests:\n\n"
+        for req in all_requests:
+            status_emoji = "✅" if req['status'] == 'completed' else "⏳"
+            message += f"{status_emoji} {req['request_id']} - {req['status']}\n"
+            message += f"👤 User: {req['user_id']}\n"
+            message += f"📅 {req['createdAt'].strftime('%m-%d %H:%M')}\n\n"
+        
+        send_message(chat_id, message)
+        
+    except Exception as e:
+        send_message(chat_id, f"Error: {str(e)}")
+
 def handle_user_requests_command(chat_id, user_id):
     """Show user's own requests"""
     try:
+        if requests_collection is None:
+            send_message(chat_id, "Database not available")
+            return
+            
         user_requests = list(requests_collection.find({'user_id': user_id}).sort('createdAt', -1).limit(10))
         
         if not user_requests:
@@ -600,16 +655,6 @@ def handle_user_requests_command(chat_id, user_id):
         
     except Exception as e:
         send_message(chat_id, f"Error: {str(e)}")
-
-# --- URL VALIDATION ---
-def validate_url(url):
-    """Validate URL format"""
-    from urllib.parse import urlparse
-    try:
-        result = urlparse(url)
-        return all([result.scheme in ['http', 'https'], result.netloc])
-    except:
-        return False
 
 # --- CONTENT MANAGEMENT ---
 
@@ -666,30 +711,6 @@ def cleanup_old_states():
         except Exception as e:
             logger.error(f"State cleanup error: {e}")
 
-# --- FORWARDING RESTRICTION ---
-def check_forwarding_restriction(message):
-    """Check if forwarding is allowed from/to restricted channels"""
-    # Check if message is being forwarded from a restricted channel
-    if 'forward_from_chat' in message:
-        forward_chat_id = message['forward_from_chat']['id']
-        if forward_chat_id in RESTRICTED_CHANNELS:
-            return False, f"❌ Forwarding from {get_channel_name(forward_chat_id)} is not allowed"
-    
-    # Check if message is being forwarded to a restricted channel
-    if 'chat' in message:
-        chat_id = message['chat']['id']
-        if chat_id in RESTRICTED_CHANNELS:
-            return False, f"❌ Forwarding to {get_channel_name(chat_id)} is not allowed"
-    
-    return True, ""
-
-def get_channel_name(channel_id):
-    """Get channel name from ID"""
-    for channel_key, info in BROADCAST_CHANNELS.items():
-        if info['id'] == channel_id:
-            return info['name']
-    return "Unknown Channel"
-
 # --- TELEGRAM UPDATE HANDLER ---
 
 def process_update(update):
@@ -701,14 +722,6 @@ def process_update(update):
         chat_id = message['chat']['id']
         text = message.get('text', '').strip()
         user_id = message['from']['id']
-        
-        # Check forwarding restriction for all messages
-        allowed, error_msg = check_forwarding_restriction(message)
-        if not allowed:
-            # Only send error to admins or if trying to forward to bot
-            if is_admin(user_id) or chat_id == user_id:
-                send_message(chat_id, error_msg)
-            return
         
         # Check if user is admin
         admin = is_admin(user_id)
@@ -761,15 +774,15 @@ def process_update(update):
         if admin:
             # Handle admin commands
             if text.startswith('/reply'):
-                if 'replymedia' in text:
-                    handle_replymedia_command(chat_id, text)
-                else:
-                    handle_reply_command(chat_id, text)
+                handle_reply_command(chat_id, text)
+                return
+            elif text.startswith('/sendmedia'):
+                handle_sendmedia_command(chat_id, text)
                 return
             elif text.startswith('/complete'):
                 handle_complete_command(chat_id, text)
                 return
-            elif text.startswith('/requests'):
+            elif text == '/requests':
                 handle_requests_command(chat_id)
                 return
             
@@ -789,17 +802,29 @@ def process_update(update):
                     "📊 All Requests - View all requests\n\n"
                     "Commands:\n"
                     "/reply <id> <url> - Send video URL to user\n"
-                    "/replymedia <id> - Forward matching media to user",
+                    "/sendmedia <id> - Send matching media to user\n"
+                    "/complete <id> <url> - Mark as completed",
                     REQUESTS_KEYBOARD
                 )
                 return
+            
+            # Requests menu
+            elif state['step'] == 'requests_menu':
+                if text == '📋 Pending Requests':
+                    handle_requests_command(chat_id)
+                    USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+                    return
+                elif text == '📊 All Requests':
+                    handle_all_requests_command(chat_id)
+                    USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
+                    return
             
             # Stats
             elif text == '📊 Stats':
                 handle_stats_command(chat_id)
                 return
             
-            # Admin posting flow - FIXED
+            # Admin posting flow
             elif text == 'DiskWala Posts':
                 USER_STATE[chat_id] = {
                     'step': 'channel_mode',
@@ -860,81 +885,52 @@ def process_update(update):
                     BROADCAST_KEYBOARD
                 )
                 return
-            
-            # --- CHANNEL MODE SELECTION ---
-            state = USER_STATE.get(chat_id, {'step': 'main', 'timestamp': time.time()})
-            
-            if state['step'] == 'channel_mode':
-                channel_name = state.get('channel_name', 'Channel')
                 
+            # Rest of admin posting flow
+            elif state['step'] == 'channel_mode':
                 if text == 'Single Post':
                     USER_STATE[chat_id]['step'] = 'channel_media'
                     USER_STATE[chat_id]['data'] = {}
-                    USER_STATE[chat_id]['timestamp'] = time.time()
-                    send_message(chat_id, f"📤 {channel_name} - Step 1/2: Send thumbnail (photo/video)")
+                    send_message(chat_id, f"📤 {state['channel_name']} - Step 1/3: Send thumbnail (photo/video)")
                     return
-                
                 elif text == 'Forward Multiple':
                     USER_STATE[chat_id]['step'] = 'channel_forward'
-                    USER_STATE[chat_id]['timestamp'] = time.time()
-                    send_message(
-                        chat_id,
-                        f"📨 Forward messages to {channel_name} channel.\n\n"
-                        "Forward messages to me and I'll send them to the channel.\n\n"
-                        "Type 'Cancel' when done."
-                    )
+                    send_message(chat_id, f"📨 Forward messages to {state['channel_name']} channel. Type 'Cancel' when done.")
                     return
             
-            # --- SINGLE POST FLOW (SIMPLIFIED) ---
+            # Handle admin posting flow steps
             elif state['step'] == 'channel_media':
-                media_id = None
-                media_type = None
-                
                 if 'video' in message:
                     media_id = message['video']['file_id']
                     media_type = 'video'
                 elif 'photo' in message:
                     media_id = message['photo'][-1]['file_id']
                     media_type = 'photo'
-                
-                if media_id:
-                    # Set default title
-                    default_title = "Hot Scene 🔥"
-                    USER_STATE[chat_id]['data'] = {
-                        'telegram_media_id': media_id, 
-                        'media_type': media_type,
-                        'title': default_title  # Auto-set default title
-                    }
-                    USER_STATE[chat_id]['step'] = 'channel_urls'  # Skip title step
-                    USER_STATE[chat_id]['timestamp'] = time.time()
-                    
-                    # Show media info and ask for URLs
-                    send_message(
-                        chat_id,
-                        f"✅ {media_type.title()} saved!\n"
-                        f"📝 Title: {default_title} (Default)\n\n"
-                        f"Step 2/2: Send download/watch URLs (one per line)"
-                    )
                 else:
                     send_message(chat_id, "❌ Send photo or video")
-                return
-            
-            # --- URL ENTRY (SIMPLIFIED) ---
-            elif state['step'] == 'channel_urls':
-                # Process URLs
-                urls = []
-                if text:
-                    # Split by newlines or commas
-                    for url in text.replace(',', '\n').split('\n'):
-                        url = url.strip()
-                        if url and validate_url(url):
-                            urls.append(url)
-                
-                if not urls:
-                    send_message(chat_id, "❌ Send valid URLs (http:// or https://)")
                     return
                 
-                # Get data from state
+                USER_STATE[chat_id]['data'] = {
+                    'telegram_media_id': media_id, 
+                    'media_type': media_type
+                }
+                USER_STATE[chat_id]['step'] = 'channel_title'
+                send_message(chat_id, f"✅ {media_type.title()} saved!\n\nStep 2/3: Send title")
+                return
+            
+            elif state['step'] == 'channel_title':
+                USER_STATE[chat_id]['data']['title'] = text.strip()
+                USER_STATE[chat_id]['step'] = 'channel_urls'
+                send_message(chat_id, "✅ Title saved!\n\nStep 3/3: Send URLs (one per line)")
+                return
+            
+            elif state['step'] == 'channel_urls':
+                urls = [url.strip() for url in text.strip().split('\n') if url.strip()]
+                
+                if not urls:
+                    send_message(chat_id, "❌ Send valid URLs")
+                    return
+                
                 title = state['data']['title']
                 media_id = state['data']['telegram_media_id']
                 media_type = state['data']['media_type']
@@ -942,15 +938,12 @@ def process_update(update):
                 channel_name = state.get('channel_name', 'Channel')
                 channel_type = state.get('channel_type', 'diskwala')
                 
-                # Create links
-                links = [{"url": url, "episode_title": "Watch Now"} for url in urls]
+                links = [{"url": url, "episode_title": "Watch Now" if i == 0 else f"Link {i+1}"} 
+                         for i, url in enumerate(urls)]
                 
+                post_number = get_next_post_number(channel_type)
                 send_message(chat_id, f"⏳ Posting to {channel_name}...")
                 
-                # Get post number before posting
-                post_number = get_next_post_number(channel_type)
-                
-                # Send post with REQUEST BUTTON (not link)
                 result = send_media_post(title, media_id, media_type, links, channel_id, channel_name, post_number)
                 
                 if result:
@@ -958,22 +951,20 @@ def process_update(update):
                         "title": title,
                         "type": "video",
                         "channel": channel_type,
+                        "post_number": post_number,
                         "thumbnail_url": f"telegram_file_id:{media_id}",
                         "post_type": f"{channel_type}_{media_type}",
                         "telegram_media_id": media_id,
                         "telegram_message_id": result.get('message_id') if isinstance(result, dict) else None,
                         "telegram_chat_id": channel_id,
-                        "diskwala_url": urls[0] if urls else "",
+                        "diskwala_url": urls[0],
                         "tags": title.lower().split(),
                         "links": links,
-                        "post_number": post_number
                     })
                     
-                    msg = f"🎉 Success!\n✅ Posted to {channel_name} channel\n"
-                    msg += f"📊 Post #{post_number}\n"
-                    msg += f"📝 With Request Video Button\n"
+                    msg = f"🎉 Success!\n✅ Posted to {channel_name} channel\n📊 Post #: {post_number}"
                     if content_id:
-                        msg += f"📋 Content ID: {content_id}"
+                        msg += f"\n📊 Content ID: {content_id}"
                     send_message(chat_id, msg, ADMIN_MAIN_KEYBOARD)
                 else:
                     send_message(chat_id, f"❌ Failed to post to {channel_name}", ADMIN_MAIN_KEYBOARD)
@@ -981,30 +972,18 @@ def process_update(update):
                 USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
                 return
             
-            # --- FORWARD MULTIPLE ---
             elif state['step'] == 'channel_forward':
-                if 'forward_from' in message or 'forward_from_chat' in message:
-                    # Check forwarding restriction
-                    allowed, error_msg = check_forwarding_restriction(message)
-                    if not allowed:
-                        send_message(chat_id, error_msg)
-                        return
-                    
+                if message.get('forward_from') or message.get('forward_from_chat'):
                     channel_id = state.get('channel_id', GROUP_TELEGRAM_ID)
                     channel_name = state.get('channel_name', 'Channel')
                     
-                    result = send_telegram('copyMessage', {
-                        'chat_id': channel_id,
-                        'from_chat_id': chat_id,
-                        'message_id': message['message_id'],
-                    })
-                    
-                    send_message(chat_id, f"✅ Forwarded to {channel_name}" if result else "❌ Failed")
-                else:
-                    send_message(chat_id, "⚠️ Forward messages from other chats")
+                    result = forward_message(channel_id, chat_id, message['message_id'])
+                    if result:
+                        send_message(chat_id, f"✅ Forwarded to {channel_name}")
+                    else:
+                        send_message(chat_id, "❌ Failed to forward")
                 return
             
-            # --- VIDEO FILES ---
             elif state['step'] == 'video_files':
                 if 'photo' in message or 'video' in message or 'document' in message:
                     file_num = get_next_sequence('video_files_counter')
@@ -1017,12 +996,15 @@ def process_update(update):
                         'caption': caption
                     })
                     
-                    send_message(chat_id, f"✅ File #{file_num} forwarded" if result else "❌ Failed")
+                    if result:
+                        send_message(chat_id, f"✅ File #{file_num} forwarded")
+                    else:
+                        send_message(chat_id, "❌ Failed")
                 else:
                     send_message(chat_id, "⚠️ Send photo/video/document")
                 return
             
-            # --- BROADCAST FLOW ---
+            # Broadcast flow
             elif state['step'] == 'broadcast_select':
                 channel_map = {
                     '📺 DiskWala': ['diskwala'],
@@ -1037,26 +1019,15 @@ def process_update(update):
                         'channels': channel_map[text],
                         'timestamp': time.time()
                     }
-                    
-                    channel_names = [BROADCAST_CHANNELS[ch]['name'] for ch in channel_map[text]]
-                    send_message(
-                        chat_id,
-                        f"✅ Selected: {', '.join(channel_names)}\n\n"
-                        f"Now send your broadcast message.\n"
-                        f"You can send:\n"
-                        f"• Text message\n"
-                        f"• Photo with caption\n"
-                        f"• Video with caption\n\n"
-                        f"Type 'Cancel' to abort."
-                    )
+                    send_message(chat_id, f"✅ Selected channels\n\nNow send your broadcast message (text or media with caption)")
                 return
             
             elif state['step'] == 'broadcast_content':
+                channels = state['channels']
                 broadcast_text = text
                 media_id = None
                 media_type = None
                 
-                # Check for media
                 if 'photo' in message:
                     media_id = message['photo'][-1]['file_id']
                     media_type = 'photo'
@@ -1066,52 +1037,18 @@ def process_update(update):
                     media_type = 'video'
                     broadcast_text = message.get('caption', '')
                 
-                if not broadcast_text and not media_id:
-                    send_message(chat_id, "❌ Please send text or media with caption")
-                    return
-                
-                # Broadcast function (simplified)
-                channels = state['channels']
-                send_message(chat_id, "⏳ Broadcasting...")
-                
                 # Simple broadcast implementation
-                results = {'success': [], 'failed': []}
                 for channel_key in channels:
-                    if channel_key in BROADCAST_CHANNELS:
-                        channel_info = BROADCAST_CHANNELS[channel_key]
-                        channel_id = channel_info['id']
-                        
-                        try:
-                            if media_id and media_type:
-                                method = 'sendPhoto' if media_type == 'photo' else 'sendVideo'
-                                key = 'photo' if media_type == 'photo' else 'video'
-                                result = send_telegram(method, {
-                                    'chat_id': channel_id,
-                                    key: media_id,
-                                    'caption': broadcast_text
-                                })
-                            else:
-                                result = send_message(channel_id, broadcast_text)
-                            
-                            if result:
-                                results['success'].append(channel_info['name'])
-                            else:
-                                results['failed'].append(channel_info['name'])
-                                
-                        except Exception as e:
-                            results['failed'].append(channel_info['name'])
+                    channel_info = BROADCAST_CHANNELS[channel_key]
+                    if media_id and media_type:
+                        if media_type == 'photo':
+                            send_photo(channel_info['id'], media_id, broadcast_text)
+                        else:
+                            send_video(channel_info['id'], media_id, broadcast_text)
+                    else:
+                        send_message(channel_info['id'], broadcast_text)
                 
-                # Build result message
-                result_msg = "📢 Broadcast Complete!\n\n"
-                if results['success']:
-                    result_msg += f"✅ Success ({len(results['success'])}):\n"
-                    result_msg += "\n".join([f"  • {ch}" for ch in results['success']])
-                
-                if results['failed']:
-                    result_msg += f"\n\n❌ Failed ({len(results['failed'])}):\n"
-                    result_msg += "\n".join([f"  • {ch}" for ch in results['failed']])
-                
-                send_message(chat_id, result_msg, ADMIN_MAIN_KEYBOARD)
+                send_message(chat_id, f"✅ Broadcast sent to {len(channels)} channel(s)", ADMIN_MAIN_KEYBOARD)
                 USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
                 return
             
@@ -1210,74 +1147,6 @@ def process_user_media_request(chat_id, user_id, message, step=None):
     
     USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
 
-def handle_admin_matching_media(chat_id, message, state):
-    """Handle admin sending matching media for a request"""
-    try:
-        request_id = state['request_id']
-        user_id = state['user_id']
-        
-        media_id = None
-        media_type = None
-        
-        if 'photo' in message:
-            media_id = message['photo'][-1]['file_id']
-            media_type = 'photo'
-            caption = message.get('caption', '')
-        elif 'video' in message:
-            media_id = message['video']['file_id']
-            media_type = 'video'
-            caption = message.get('caption', '')
-        elif 'text' in message:
-            # Admin sent text with URL
-            send_message(user_id, f"✅ Your request #{request_id} has been fulfilled!\n\n🔗 {message['text']}")
-            
-            # Update request
-            requests_collection.update_one(
-                {'request_id': request_id},
-                {
-                    '$set': {
-                        'status': 'completed',
-                        'video_result': message['text'],
-                        'updatedAt': datetime.utcnow()
-                    }
-                }
-            )
-            
-            send_message(chat_id, f"✅ Text/URL sent to user for request {request_id}")
-            USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-            return
-        else:
-            send_message(chat_id, "❌ Please send photo, video, or text with URL")
-            return
-        
-        # Forward matching media to user
-        if forward_media_to_user(user_id, media_id, media_type, 
-                                caption=f"✅ Your request #{request_id} has been fulfilled!"):
-            
-            # Update request
-            requests_collection.update_one(
-                {'request_id': request_id},
-                {
-                    '$set': {
-                        'status': 'completed',
-                        'video_result': 'Media forwarded',
-                        'result_media_id': media_id,
-                        'result_media_type': media_type,
-                        'updatedAt': datetime.utcnow()
-                    }
-                }
-            )
-            
-            send_message(chat_id, f"✅ Matching media forwarded to user for request {request_id}")
-        else:
-            send_message(chat_id, f"❌ Failed to forward media for request {request_id}")
-        
-        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-        USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-
 def handle_stats_command(chat_id):
     """Handle stats command"""
     try:
@@ -1339,7 +1208,7 @@ def index():
         "service": PRODUCT_NAME, 
         "status": "online",
         "bot": f"@{BOT_USERNAME}" if BOT_USERNAME else "Not set",
-        "features": ["telegram_bot", "video_requests", "multi_channel", "media_forwarding", "forwarding_restrictions"]
+        "features": ["telegram_bot", "video_requests", "multi_channel", "media_forwarding"]
     }), 200
 
 @app.route('/health', methods=['GET'])
@@ -1427,5 +1296,4 @@ if __name__ == '__main__':
     
     logger.info(f"Starting server on port {PORT}")
     logger.info(f"Bot username: @{BOT_USERNAME if BOT_USERNAME else 'Not set'}")
-    logger.info(f"Restricted channels: {RESTRICTED_CHANNELS}")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
