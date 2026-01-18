@@ -1075,7 +1075,7 @@ def handle_admin_flow(chat_id, text, message, state):
                     "tags": title.lower().split(),
                     "links": links,
                     "views": 0,
-                    "created_at': datetime.utcnow()
+                    "created_at": datetime.utcnow()  # FIXED: Corrected string literal
                 }
                 content_collection.insert_one(content_data)
                 
