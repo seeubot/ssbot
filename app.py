@@ -858,8 +858,6 @@ def broadcast_plan_promotion(chat_id, target_type, message_text):
         send_message(chat_id, f"Error: {str(e)}")
         USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
 
-# --- REST OF THE VIDEO REQUEST HANDLERS (same as before) ---
-
 def handle_user_request(chat_id, user_id):
     """Handle user's video request initiation"""
     USER_STATE[chat_id] = {
@@ -1629,7 +1627,25 @@ def handle_stats_command(chat_id):
     except Exception as e:
         send_message(chat_id, f"Error getting stats: {str(e)}")
 
-# --- REST OF THE CODE (Flask routes, background tasks, startup) ---
+# --- CLEANUP OLD STATES FUNCTION ---
+def cleanup_old_states():
+    """Clean up expired user states"""
+    while True:
+        threading.Event().wait(300)  # Check every 5 minutes
+        current_time = time.time()
+        try:
+            expired = [
+                chat_id for chat_id, state in USER_STATE.items()
+                if current_time - state.get('timestamp', 0) > 1800  # 30 minutes
+            ]
+            for chat_id in expired:
+                USER_STATE.pop(chat_id, None)
+            if expired:
+                logger.info(f"Cleaned {len(expired)} expired user states")
+        except Exception as e:
+            logger.error(f"State cleanup error: {e}")
+
+# --- FLASK ROUTES ---
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -1659,6 +1675,8 @@ def index():
 def health():
     status = {"status": "healthy", "service": PRODUCT_NAME}
     return jsonify(status), 200
+
+# --- BACKGROUND TASKS ---
 
 def flush_views_once():
     """Flush all pending views to DB"""
@@ -1711,6 +1729,8 @@ def set_webhook():
         'max_connections': 5,
         'drop_pending_updates': True
     })
+
+# --- STARTUP ---
 
 if __name__ == '__main__':
     logger.info(f"Starting {PRODUCT_NAME}...")
