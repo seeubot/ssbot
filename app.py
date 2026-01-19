@@ -88,6 +88,10 @@ def is_admin(user_id):
     """Check if user is admin"""
     return user_id == ADMIN_TELEGRAM_ID
 
+def is_private_chat(chat_id):
+    """Check if chat is a private chat (not a group or channel)"""
+    return chat_id > 0
+
 # --- TELEGRAM SETUP ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/" if BOT_TOKEN else None
@@ -151,7 +155,7 @@ REQUESTS_KEYBOARD = {
 REQUEST_MEDIA_KEYBOARD = {
     'keyboard': [
         [{'text': '📷 Send Photo'}, {'text': '🎥 Send Video'}],
-        [{'text': '📝 Text Description'}, {'text': '❌ Cancel'}]
+        [{'text': '❌ Cancel'}]
     ],
     'resize_keyboard': True,
     'one_time_keyboard': False
@@ -182,6 +186,18 @@ def send_message(chat_id, text, keyboard=None, parse_mode=None, reply_markup=Non
         payload['parse_mode'] = parse_mode
     return send_telegram('sendMessage', payload)
 
+def delete_message(chat_id, message_id):
+    """Delete a message"""
+    try:
+        payload = {
+            'chat_id': chat_id,
+            'message_id': message_id
+        }
+        return send_telegram('deleteMessage', payload)
+    except Exception as e:
+        logger.error(f"Delete message error: {e}")
+        return False
+
 def send_media_post(title, media_id, media_type, links, channel_id, channel_name, post_number=None):
     """Send media post to specified channel with improved formatting"""
     if not TELEGRAM_API:
@@ -203,7 +219,7 @@ def send_media_post(title, media_id, media_type, links, channel_id, channel_name
         ]
     }
     
-    # Default title format
+    # Simple caption without movie/series mention
     caption = f"{post_number_text}🔥 {title} 🔥\n\n📥 Download Links/👀 Watch Online\n\n{link_text}\n━━━━━━━━━━━━━━━━━\nPowered by {PRODUCT_NAME}"
     
     method = 'sendPhoto' if media_type == 'photo' else 'sendVideo'
@@ -271,7 +287,7 @@ def copy_message(from_chat_id, to_chat_id, message_id):
         return False
 
 # --- VIDEO REQUEST FUNCTIONS ---
-def create_video_request(user_id, media_id=None, media_type=None, message=None, text_description=None):
+def create_video_request(user_id, media_id=None, media_type=None, message=None):
     """Create a new video request from user"""
     try:
         request_id = get_next_sequence('video_request_id')
@@ -281,7 +297,6 @@ def create_video_request(user_id, media_id=None, media_type=None, message=None, 
             'user_id': user_id,
             'media_id': media_id,
             'media_type': media_type,
-            'text_description': text_description,
             'telegram_message_id': message.get('message_id') if message else None,
             'status': 'pending',
             'video_result': None,
@@ -303,10 +318,6 @@ def create_video_request(user_id, media_id=None, media_type=None, message=None, 
                 send_photo(ADMIN_TELEGRAM_ID, media_id, caption)
             elif media_type == 'video':
                 send_video(ADMIN_TELEGRAM_ID, media_id, caption)
-        elif text_description:
-            # Send text description to admin
-            caption = f"🆕 Request #{request_doc['request_id']}\n👤 From: {user_id}\n📝 Description: {text_description}"
-            send_message(ADMIN_TELEGRAM_ID, caption)
         
         notify_admin_new_request(request_doc)
         
@@ -321,7 +332,7 @@ def notify_admin_new_request(request_doc):
     try:
         user_id = request_doc['user_id']
         request_id = request_doc['request_id']
-        media_type = request_doc.get('media_type', 'Text')
+        media_type = request_doc.get('media_type', 'Unknown')
         
         message = f"""
 📥 New Video Request #{request_id}
@@ -341,7 +352,10 @@ Commands:
         logger.error(f"Notify admin error: {e}")
 
 def handle_user_request(chat_id, user_id):
-    """Handle user's video request initiation"""
+    """Handle user's video request initiation - only in private chat"""
+    if not is_private_chat(chat_id):
+        return  # Ignore requests in groups/channels
+    
     USER_STATE[chat_id] = {
         'step': 'request_media',
         'user_id': user_id,
@@ -350,7 +364,7 @@ def handle_user_request(chat_id, user_id):
     send_message(
         chat_id,
         "📥 Video Request\n\n"
-        "Send a photo/video of what you're looking for, or describe it in text.\n"
+        "Send a photo or video of what you're looking for.\n"
         "We'll forward it to our admin who will find the matching video for you.\n\n"
         "You can:\n"
         "1. Send a photo/video directly\n"
@@ -359,11 +373,13 @@ def handle_user_request(chat_id, user_id):
         REQUEST_MEDIA_KEYBOARD
     )
 
-def process_user_media_request(chat_id, user_id, message, text=None):
-    """Process user's media request"""
+def process_user_media_request(chat_id, user_id, message):
+    """Process user's media request - only in private chat"""
+    if not is_private_chat(chat_id):
+        return  # Ignore requests in groups/channels
+    
     media_id = None
     media_type = None
-    text_description = None
     
     if 'photo' in message:
         media_id = message['photo'][-1]['file_id']
@@ -371,11 +387,8 @@ def process_user_media_request(chat_id, user_id, message, text=None):
     elif 'video' in message:
         media_id = message['video']['file_id']
         media_type = 'video'
-    elif text:
-        text_description = text
-        media_type = 'text'
     else:
-        send_message(chat_id, "❌ Please send a photo, video, or text description", REQUEST_MEDIA_KEYBOARD)
+        send_message(chat_id, "❌ Please send a photo or video", REQUEST_MEDIA_KEYBOARD)
         return
     
     # Create request
@@ -383,8 +396,7 @@ def process_user_media_request(chat_id, user_id, message, text=None):
         user_id=user_id,
         media_id=media_id,
         media_type=media_type,
-        message=message,
-        text_description=text_description
+        message=message
     )
     
     user_keyboard = USER_MAIN_KEYBOARD
@@ -681,7 +693,7 @@ def handle_admin_flow(chat_id, text, message, state):
         USER_STATE[chat_id]['data'] = {
             'telegram_media_id': media_id,
             'media_type': media_type,
-            'title': "Movie / Content Title"  # Default title
+            'title': "Content Title"  # Simple default title
         }
         USER_STATE[chat_id]['step'] = 'channel_urls'
         send_message(chat_id, f"✅ {media_type.title()} saved!\n\nSend URLs (one per line):")
@@ -903,44 +915,29 @@ def handle_stats_command(chat_id):
     except Exception as e:
         send_message(chat_id, f"Error getting stats: {str(e)}")
 
-def handle_my_requests_command(chat_id, user_id):
-    """Show user's own requests"""
-    try:
-        requests = get_user_requests(user_id)
-        
-        if not requests:
-            send_message(chat_id, "🆕 You have no requests yet.\n\nUse '📥 Request Video' to submit a request.")
-            return
-        
-        message_text = "🆕 Your Requests:\n\n"
-        for req in requests:
-            status_emoji = "✅" if req['status'] == 'completed' else "⏳"
-            message_text += f"{status_emoji} {req['request_id']} - {req['status'].title()}\n"
-            message_text += f"📅 {req['createdAt'].strftime('%Y-%m-%d %H:%M')}\n"
-            
-            if req['status'] == 'completed' and req.get('video_result'):
-                result_preview = req['video_result'][:50]
-                if len(req['video_result']) > 50:
-                    result_preview += "..."
-                message_text += f"🎬 Result: {result_preview}\n"
-            
-            message_text += "\n"
-        
-        send_message(chat_id, message_text)
-        
-    except Exception as e:
-        send_message(chat_id, f"Error: {str(e)}")
-
 # --- MAIN UPDATE HANDLER ---
 def process_update(update):
     try:
         message = update.get('message')
         if not message:
             return
-            
+        
+        # IGNORE USER JOIN/LEFT MESSAGES
+        if 'new_chat_members' in message or 'left_chat_member' in message:
+            # Try to delete the service message
+            chat_id = message['chat']['id']
+            message_id = message.get('message_id')
+            if message_id:
+                delete_message(chat_id, message_id)
+            return
+        
         chat_id = message['chat']['id']
         text = message.get('text', '').strip()
         user_id = message['from']['id']
+        
+        # ONLY RESPOND IN PRIVATE CHATS (not in groups/channels)
+        if not is_private_chat(chat_id):
+            return
         
         admin = is_admin(user_id)
         user_keyboard = USER_MAIN_KEYBOARD
@@ -1012,7 +1009,7 @@ def process_update(update):
         
         # Handle request flow
         if state.get('step') == 'request_media':
-            if text in ['📷 Send Photo', '🎥 Send Video', '📝 Text Description']:
+            if text in ['📷 Send Photo', '🎥 Send Video']:
                 if text == '📷 Send Photo':
                     USER_STATE[chat_id] = {
                         'step': 'waiting_photo',
@@ -1020,31 +1017,21 @@ def process_update(update):
                         'timestamp': time.time()
                     }
                     send_message(chat_id, "📷 Please send a photo of the scene you're looking for:")
-                elif text == '🎥 Send Video':
+                else:
                     USER_STATE[chat_id] = {
                         'step': 'waiting_video',
                         'user_id': user_id,
                         'timestamp': time.time()
                     }
                     send_message(chat_id, "🎥 Please send a video clip of what you're looking for:")
-                else:
-                    USER_STATE[chat_id] = {
-                        'step': 'waiting_text',
-                        'user_id': user_id,
-                        'timestamp': time.time()
-                    }
-                    send_message(chat_id, "📝 Please describe what you're looking for:")
                 return
             elif 'photo' in message or 'video' in message:
                 process_user_media_request(chat_id, user_id, message)
                 return
         
         # Handle waiting for media
-        elif state.get('step') in ['waiting_photo', 'waiting_video', 'waiting_text']:
-            if state.get('step') == 'waiting_text' and text:
-                process_user_media_request(chat_id, user_id, message, text)
-                return
-            elif ('photo' in message or 'video' in message) and state.get('step') in ['waiting_photo', 'waiting_video']:
+        elif state.get('step') in ['waiting_photo', 'waiting_video']:
+            if ('photo' in message or 'video' in message):
                 process_user_media_request(chat_id, user_id, message)
                 return
             else:
@@ -1056,48 +1043,15 @@ def process_update(update):
             process_user_media_request(chat_id, user_id, message)
             return
         
-        # Handle text description directly
-        elif text and state.get('step') in ['main', 'request_media'] and len(text) > 10:
-            # If user sends a descriptive text, treat it as a request
-            USER_STATE[chat_id] = {
-                'step': 'confirm_text_request',
-                'user_id': user_id,
-                'text_description': text,
-                'timestamp': time.time()
-            }
-            
-            send_message(
-                chat_id,
-                f"📝 Confirm Text Request\n\n"
-                f"Your description: {text[:100]}...\n\n"
-                f"Is this what you're looking for?",
-                {
-                    'keyboard': [
-                        [{'text': '✅ Yes, Submit'}, {'text': '❌ No, Cancel'}]
-                    ],
-                    'resize_keyboard': True
-                }
-            )
-            return
-        
-        elif state.get('step') == 'confirm_text_request':
-            if text == '✅ Yes, Submit':
-                text_description = state.get('text_description')
-                process_user_media_request(chat_id, user_id, message, text_description)
-                return
-            elif text == '❌ No, Cancel':
-                send_message(chat_id, "❌ Request cancelled.", user_keyboard)
-                USER_STATE[chat_id] = {'step': 'main', 'timestamp': time.time()}
-                return
-        
         # Default: show menu
         send_message(chat_id, "Please select an option:", user_keyboard)
         
     except Exception as e:
         logger.error(f"Process error: {e}", exc_info=True)
         try:
-            keyboard = ADMIN_MAIN_KEYBOARD if is_admin(user_id) else USER_MAIN_KEYBOARD
-            send_message(chat_id, "🚨 An error occurred. Please try again.", keyboard)
+            if is_private_chat(chat_id):
+                keyboard = ADMIN_MAIN_KEYBOARD if is_admin(user_id) else USER_MAIN_KEYBOARD
+                send_message(chat_id, "🚨 An error occurred. Please try again.", keyboard)
         except:
             pass
 
